@@ -1,0 +1,16 @@
+SOURCES += [
+    "forge.cpp",
+]
+
+USE_LIBS += [
+    "static:js",
+]
+
+DEFINES["EXPORT_JS_API"] = True
+
+LOCAL_INCLUDES += [
+    "!..",
+    "..",
+]
+
+Program("forge")
