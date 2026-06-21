@@ -1,7 +1,13 @@
-print("Hello Forge");
+// print("Hello Forge");
 
-let x = 50;
+// let x = 50;
 
-print("x =", x);
+// print("x =", x);
 
-100;
+// 100;
+print(typeof setTimeout);
+
+const v = setTimeout(() => {
+    print("hello");
+}, 10000);
+print(v)

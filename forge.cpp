@@ -3,7 +3,9 @@
 
 #include <fstream>
 #include <sstream>
-
+#include <vector>
+#include <chrono>
+#include <thread>
 #include "js/CompileOptions.h"
 #include "js/CompilationAndEvaluation.h"
 #include "js/Context.h"
@@ -20,11 +22,13 @@
 #include "js/Conversions.h"
 #include "js/Exception.h"
 #include "js/ErrorReport.h"
+// cx points to SpiderMonkey's context object.
 static const JSClass globalClass = {
     "global",
     JSCLASS_GLOBAL_FLAGS,
     &JS::DefaultGlobalClassOps,
 };
+
 
 static bool Print(JSContext* cx,
                   unsigned argc,
@@ -59,7 +63,62 @@ static bool Print(JSContext* cx,
     args.rval().setUndefined();
     return true;
 }
+struct Timer {
+    int id;
+    uint64_t dueTime;
+};
+std::vector<Timer> timers;
+static int nextTimerId = 1;
+uint64_t GetTimeMs()
+{
+    return std::chrono::duration_cast<
+        std::chrono::milliseconds
+    >(
+        std::chrono::steady_clock::now()
+            .time_since_epoch()
+    ).count();
+}
 
+static bool SetTimeout(
+    JSContext* cx,
+    unsigned argc,
+    JS::Value* vp)
+{
+    JS::CallArgs args =
+        JS::CallArgsFromVp(argc, vp);
+
+    if (argc < 2) {
+        return false;
+    }
+
+    double delay = 0;
+
+    if (!JS::ToNumber(
+            cx,
+            args[1],
+            &delay))
+    {
+        return false;
+    }
+
+    Timer timer;
+
+    timer.id = nextTimerId++;
+    timer.dueTime =
+        GetTimeMs() + (uint64_t)delay;
+
+    timers.push_back(timer);
+
+    printf(
+        "Timer %d registered (%0.f ms)\n",
+        timer.id,
+        delay
+    );
+
+    args.rval().setInt32(timer.id);
+
+    return true;
+}
 int main(int argc, char* argv[])
 {
     if (!JS_Init()) {
@@ -110,6 +169,16 @@ int main(int argc, char* argv[])
                 0))
         {
             return 1;
+        }
+        if(!JS_DefineFunction(
+    cx,
+    global,
+    "setTimeout",
+    SetTimeout,
+    2,
+    0
+)){
+            return 1 ;
         }
 
         if (argc < 2) {
@@ -178,7 +247,36 @@ int main(int argc, char* argv[])
             printf("Result = %f\n", rval.toNumber());
         }
     }
+printf("Starting event loop\n");
 
+while (!timers.empty())
+{
+    uint64_t now = GetTimeMs();
+
+    for (
+        auto it = timers.begin();
+        it != timers.end();
+    )
+    {
+        if (now >= it->dueTime)
+        {
+            printf(
+                "Timer %d expired\n",
+                it->id
+            );
+
+            it = timers.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(1)
+    );
+}
     JS_DestroyContext(cx);
     JS_ShutDown();
 
