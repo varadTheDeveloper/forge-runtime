@@ -1,13 +1,12 @@
-// print("Hello Forge");
+queueMicrotask(() => {
+    print("microtask");
+});
 
-// let x = 50;
+setTimeout(() => {
+    print("timeout");
+}, 0);
 
-// print("x =", x);
+setInterval(() => {
+    print("tick");
+}, 1000);
 
-// 100;
-print(typeof setTimeout);
-
-const v = setTimeout(() => {
-    print("hello");
-}, 10000);
-print(v)
