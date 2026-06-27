@@ -1,67 +1,93 @@
-# Forge Runtime
+# Forge
 
-A lightweight JavaScript runtime built on top of Mozilla SpiderMonkey.
+Forge is an experimental JavaScript runtime built on top of Mozilla's SpiderMonkey engine.
 
-## Current Features
+The goal of Forge is to learn and expose how modern JavaScript runtimes work internally by implementing runtime features from scratch instead of relying on existing implementations.
 
-* Execute JavaScript files
-* Native `print()` API
-* Native `setTimeout()` API (work in progress)
-* Custom event loop implementation (work in progress)
-* Built directly on SpiderMonkey
+## Features
+
+### Runtime
+
+* JavaScript execution powered by SpiderMonkey
+* Custom global object
+* Native `print()` implementation
+
+### Timers
+
+* `setTimeout()`
+* `clearTimeout()`
+* `setInterval()`
+
+### Event Loop
+
+* Custom event loop implementation
+* Timer queue (macrotasks)
+* Microtask queue (FIFO)
+* `queueMicrotask()`
+
+## Current Architecture
+
+```text
+                 JavaScript
+                      │
+      ┌───────────────┴───────────────┐
+      │                               │
+      ▼                               ▼
+ queueMicrotask()              setTimeout()
+ Promise Jobs (WIP)            setInterval()
+      │                               │
+      ▼                               ▼
+  Microtask Queue                Timer Queue
+      │                               │
+      └───────────────┬───────────────┘
+                      ▼
+                 Event Loop
+                      │
+                Execute Jobs
+```
 
 ## Example
 
 ```js
-print("Hello Forge");
+queueMicrotask(() => {
+    print("microtask");
+});
 
 setTimeout(() => {
-    print("Hello after timeout");
-}, 1000);
+    print("timeout");
+}, 0);
+
+print("sync");
 ```
 
-Run:
+Output:
 
-```bash
-forge hello.js
-```
-
-## Architecture
-
-```
-JavaScript
-     ↓
-SpiderMonkey
-     ↓
-Forge Runtime APIs
-     ↓
-Event Loop
+```text
+sync
+microtask
+timeout
 ```
 
 ## Roadmap
 
-### v0.1
-
-* [x] Execute JavaScript files
-* [x] Native print()
-* [x] JavaScript evaluation
-* [x] Timer registration
-* [x] Basic event loop
-
-### v0.2
-
-* [ ] Execute timer callbacks
-* [ ] clearTimeout()
-* [ ] setInterval()
-* [ ] Improved error reporting
-
-### v0.3
-
+* [x] `print()`
+* [x] `setTimeout()`
+* [x] `clearTimeout()`
+* [x] `setInterval()`
+* [x] `queueMicrotask()`
+* [x] Event Loop
+* [ ] Promise Job Queue
+* [ ] `fetch()`
 * [ ] File System APIs
-* [ ] HTTP Server
+* [ ] TCP/HTTP Networking
+* [ ] ES Modules
 * [ ] Worker Threads
-* [ ] Built-in SQLite
+* [ ] WebAssembly APIs
 
 ## Why Forge?
 
-Forge is an experiment in building a modern JavaScript runtime from the ground up using SpiderMonkey. The goal is to explore runtime architecture, event loops, native APIs, concurrency, and developer experience while remaining lightweight and easy to understand.
+Forge is a learning-focused runtime that explores how JavaScript engines communicate with the host environment. Every feature is implemented incrementally to better understand the architecture behind browsers and server-side runtimes.
+
+## Status
+
+Forge is under active development and is not intended for production use.

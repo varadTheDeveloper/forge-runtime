@@ -39,31 +39,31 @@ struct Microtask {
 };
 
 std::vector<std::unique_ptr<Microtask>> microtasks;
-class ForgeJobQueue : public JS::JobQueue
-{
-public:
-    bool empty() const override
-    {
-        return microtasks.empty();
-    }
-    bool isDrainingStopped() const override
-{
-    return false;
-}
-bool getHostDefinedData(
-    JSContext* cx,
-    JS::MutableHandle<JSObject*> data
-) const override
-{
-    data.set(nullptr);
+// class ForgeJobQueue : public JS::JobQueue // testing
+// {
+// public:
+//     bool empty() const override
+//     {
+//         return microtasks.empty();
+//     }
+//     bool isDrainingStopped() const override
+// {
+//     return false;
+// }
+// bool getHostDefinedData(
+//     JSContext* cx,
+//     JS::MutableHandle<JSObject*> data
+// ) const override
+// {
+//     data.set(nullptr);
 
-    return true;
-}
-void runJobs(JSContext* cx) override
-{
-}
-};
-ForgeJobQueue jobQueue;
+//     return true;
+// }
+// void runJobs(JSContext* cx) override
+// {
+// }
+// };
+// ForgeJobQueue jobQueue;
 static bool Print(JSContext* cx, unsigned argc, JS::Value* vp) {
   JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
 
