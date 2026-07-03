@@ -1,93 +1,46 @@
-# Forge
+# Forge Runtime
 
-Forge is an experimental JavaScript runtime built on top of Mozilla's SpiderMonkey engine.
-
-The goal of Forge is to learn and expose how modern JavaScript runtimes work internally by implementing runtime features from scratch instead of relying on existing implementations.
+A JavaScript runtime powered by Mozilla SpiderMonkey.
 
 ## Features
 
-### Runtime
+- JavaScript Runtime
+- Event Loop
+- print()
+- setTimeout()
+- clearTimeout()
+- setInterval()
+- clearInterval()
 
-* JavaScript execution powered by SpiderMonkey
-* Custom global object
-* Native `print()` implementation
+## Installation
 
-### Timers
+Download the latest Windows installer from the Releases page.
 
-* `setTimeout()`
-* `clearTimeout()`
-* `setInterval()`
+Run:
 
-### Event Loop
-
-* Custom event loop implementation
-* Timer queue (macrotasks)
-* Microtask queue (FIFO)
-* `queueMicrotask()`
-
-## Current Architecture
-
-```text
-                 JavaScript
-                      │
-      ┌───────────────┴───────────────┐
-      │                               │
-      ▼                               ▼
- queueMicrotask()              setTimeout()
- Promise Jobs (WIP)            setInterval()
-      │                               │
-      ▼                               ▼
-  Microtask Queue                Timer Queue
-      │                               │
-      └───────────────┬───────────────┘
-                      ▼
-                 Event Loop
-                      │
-                Execute Jobs
+```bash
+forge hello.js
 ```
 
 ## Example
 
-```js
-queueMicrotask(() => {
-    print("microtask");
-});
+```javascript
+print("Hello Forge!");
 
 setTimeout(() => {
-    print("timeout");
-}, 0);
-
-print("sync");
+    print("Timer!");
+}, 1000);
 ```
 
-Output:
+## Current Status
 
-```text
-sync
-microtask
-timeout
-```
+Forge is currently in Preview (v0.1.0).
 
-## Roadmap
+More APIs are coming:
 
-* [x] `print()`
-* [x] `setTimeout()`
-* [x] `clearTimeout()`
-* [x] `setInterval()`
-* [x] `queueMicrotask()`
-* [x] Event Loop
-* [ ] Promise Job Queue
-* [ ] `fetch()`
-* [ ] File System APIs
-* [ ] TCP/HTTP Networking
-* [ ] ES Modules
-* [ ] Worker Threads
-* [ ] WebAssembly APIs
-
-## Why Forge?
-
-Forge is a learning-focused runtime that explores how JavaScript engines communicate with the host environment. Every feature is implemented incrementally to better understand the architecture behind browsers and server-side runtimes.
-
-## Status
-
-Forge is under active development and is not intended for production use.
+- process
+- fs
+- fetch
+- modules
+- http
+- net

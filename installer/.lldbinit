@@ -1,0 +1,4 @@
+script ignore__see_bug_1605268 = True
+
+script topsrcdir = "C:/spidermonkey-dev/gecko-dev"; lldb.debugger.HandleCommand("command source -s true '%s'" % os.path.join(topsrcdir, ".lldbinit"))
+
