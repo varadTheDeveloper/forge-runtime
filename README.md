@@ -1,46 +1,85 @@
-# Forge Runtime
+# Forge
 
-A JavaScript runtime powered by Mozilla SpiderMonkey.
+Forge is an experimental JavaScript runtime built on Mozilla's SpiderMonkey engine.
 
-## Features
+The project focuses on building a modern runtime from the ground up with a native, high-performance architecture rather than layering new APIs over existing runtimes.
 
-- JavaScript Runtime
-- Event Loop
-- print()
-- setTimeout()
-- clearTimeout()
-- setInterval()
-- clearInterval()
+> **Status:** Early development
 
-## Installation
+---
 
-Download the latest Windows installer from the Releases page.
+## Current Progress
 
-Run:
+### ✅ Completed
 
-```bash
-forge hello.js
-```
+- SpiderMonkey integration
+- Forge Core foundation
+  - Types
+  - Error
+  - Result / ResultVoid
+  - Assert
+  - Allocator
+  - UniquePtr
+  - Vector
+- Native Windows IOCP Event Loop
+- `setTimeout`
+- `setInterval`
+- `clearTimeout`
 
-## Example
+---
+
+## Current Platform
+
+- Windows x64
+
+Linux and macOS support are planned.
+
+---
+
+## Running
+
+Create a file:
 
 ```javascript
-print("Hello Forge!");
-
-setTimeout(() => {
-    print("Timer!");
-}, 1000);
+console.log("Hello Forge!");
 ```
 
-## Current Status
+Run it:
 
-Forge is currently in Preview (v0.1.0).
+```bash
+forge.exe hello.js
+```
 
-More APIs are coming:
+---
 
-- process
-- fs
-- fetch
-- modules
-- http
-- net
+## Benchmarks
+
+| Benchmark | Forge | Bun | Node |
+|-----------|------:|----:|-----:|
+| Startup | 25.01 ms | 47.35 ms | 53.85 ms |
+| JSON | 383.29 ms | 264.53 ms | 566.12 ms |
+| Loop | 89.96 ms | 81.23 ms | 103.21 ms |
+
+---
+
+## Roadmap
+
+The next major milestones are:
+
+- Arena allocator
+- Collections
+- Filesystem
+- Networking
+- HTTP server
+- Worker threads
+- Runtime integration
+- Startup optimization
+- Module system
+
+See `ROADMAP.md` for details.
+
+---
+
+## License
+
+MIT
