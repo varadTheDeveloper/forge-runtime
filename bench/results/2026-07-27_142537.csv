@@ -1,0 +1,7 @@
+"Benchmark","Runtime","AvgMs","MinMs"
+"startup.js","bun","41.82","38.57"
+"startup.js","node","45.57","45.39"
+"json-bench.js","bun","253.87","252.74"
+"json-bench.js","node","540.66","538.47"
+"loop-bench.js","bun","76.27","72"
+"loop-bench.js","node","96.24","92.26"
