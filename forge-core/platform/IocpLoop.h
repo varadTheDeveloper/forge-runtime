@@ -23,7 +23,9 @@ namespace forge::core::platform
 
 /// A single pending asynchronous I/O operation.
 ///
-/// Future socket/file code (Phase 6/5) embeds this as the *first* member of
+/// Future async socket code (Phase 5 — File (Phase 3) turned out to stay
+/// synchronous by design, see File.md's Non-Goals, so it never ended up
+/// using this) embeds this as the *first* member of
 /// its own per-operation struct (so a `LPOVERLAPPED` handed back by
 /// `GetQueuedCompletionStatus` can be reinterpret_cast back to the
 /// containing `IoCompletion`, and from there — once that owning struct also
@@ -52,7 +54,8 @@ struct IoCompletion : OVERLAPPED
 /// Single-threaded by design (matches the single-threaded JS event-loop
 /// model every other engine — V8/Node, JavaScriptCore/Bun — also uses):
 /// exactly one thread calls Run()/RunOnce(). Blocking, CPU-heavy work
-/// belongs on the Phase 7 thread pool, not on this loop.
+/// belongs on the Phase 4 thread pool (ThreadPool — see Thread.md), not
+/// on this loop.
 class IocpLoop
 {
 public:
@@ -96,8 +99,10 @@ public:
     /// forge.cpp) uses this — together with its own notion of other
     /// pending work, like a JS job queue — to decide when it's safe to
     /// stop calling RunOnce()/Run(). Note this does not yet account for
-    /// pending async I/O operations posted via AssociateHandle — Phase 5/6
-    /// will need to add an active-operation count for that, the same way
+    /// pending async I/O operations posted via AssociateHandle — a future
+    /// async Socket variant (see Socket.md's Extensibility; this phase's
+    /// Socket stayed synchronous by design, same reasoning as File) will
+    /// need to add an active-operation count for that, the same way
     /// libuv/Node track "active handles".
     [[nodiscard]]
     bool Empty() const noexcept;
@@ -124,9 +129,9 @@ public:
     Result<void> RunOnce() noexcept;
 
     /// Calls RunOnce() until RequestStop() is called. Intended as the
-    /// process's main loop once the runtime is wired up (Phase 8); until
-    /// then RunOnce() is the more useful entry point for testing pieces in
-    /// isolation.
+    /// process's main loop once the runtime is wired up (Runtime
+    /// Integration — see ROADMAP.md's Phase 6); until then RunOnce() is
+    /// the more useful entry point for testing pieces in isolation.
     [[nodiscard]]
     Result<void> Run() noexcept;
 

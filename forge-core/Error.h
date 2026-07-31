@@ -40,7 +40,15 @@ enum class ErrorCode : u32
 
     InvalidData,
 
-    ParseError
+    ParseError,
+
+    /// A failure whose only useful detail is the raw native/OS error code
+    /// carried in NativeCode() — the caller should inspect NativeCode()
+    /// rather than branch on Code() alone. Listed in Error.md's frozen
+    /// spec (see "Public API" -> "ErrorCode") but missing from this
+    /// enum until Phase 3 needed it for Win32 file I/O failures that
+    /// don't map cleanly onto any of the categories above.
+    PlatformError
 };
 
 /// Lightweight value type representing a recoverable error.

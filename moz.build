@@ -1,5 +1,25 @@
 SOURCES += [
+    "forge-core/ConditionVariable.cpp",
+    "forge-core/File.cpp",
+    "forge-core/memory/DefaultAllocator.cpp",
+    "forge-core/memory/detail/AllocationBackend.cpp",
+    "forge-core/Mutex.cpp",
+    "forge-core/platform/IocpLoop.cpp",
+    "forge-core/platform/TimerScheduler.cpp",
+    "forge-core/platform/Win32Error.cpp",
+    "forge-core/Socket.cpp",
+    "forge-core/Thread.cpp",
+    "forge-core/ThreadPool.cpp",
     "forge.cpp",
+]
+
+# ws2_32 backs every Winsock call Socket.cpp makes (socket/connect/bind/
+# listen/accept/send/recv/closesocket/WSAStartup/WSACleanup, plus the
+# WSAE*-prefixed error constants platform/Win32Error.cpp's
+# TranslateWinsockError depends on). Nothing before Phase 5 (Networking)
+# needed a networking import library, so this is new this phase.
+OS_LIBS += [
+    "ws2_32",
 ]
 
 USE_LIBS += [

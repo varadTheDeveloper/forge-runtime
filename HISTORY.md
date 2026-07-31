@@ -1,0 +1,2041 @@
+# Decision History
+
+This file records decisions already made on Forge Core components. Read this
+before touching any file under `forge/forge-core/` — if a component is
+listed as Frozen here, do not redesign it; only bugs, security issues,
+incorrect behaviour, or fundamental design flaws justify a change (see
+`PROJECT_CONTEXT.md` → Development Rules).
+
+---
+
+## Types
+
+Decision
+
+Fixed-width aliases only (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `Byte`,
+`Size`, `Offset`). No higher-level type utilities live here.
+
+Reason
+
+Keep the lowest layer dependency-free and trivial; every other component
+depends on this one, so it must never grow.
+
+Status
+
+Frozen.
+
+---
+
+## Error
+
+Decision
+
+`Error` stores only an `ErrorCode` (canonical, generic — no module-specific
+codes like `FileNotFound`) and a `NativeError` (`i32`) platform code. No
+message, no formatting, no stack trace, no logging, no exceptions.
+`constexpr`/`noexcept` throughout, trivially movable, no heap allocation.
+
+Reason
+
+`Error` is embedded inline inside `Result<T>`, so it must stay small,
+allocation-free, and cheap to copy/move. Formatting and logging are
+explicitly out of scope so the type can stay platform-independent.
+
+Status
+
+Frozen. Full spec in `forge/forge-core/Error.md`. Future additions may only
+add generic `ErrorCode` values or platform-specific conversion helpers
+implemented outside the type — never allocation, logging, formatting, or
+module-specific codes.
+
+---
+
+## Failure
+
+Decision
+
+`Failure` is a thin wrapper around `Error`, used only to disambiguate
+constructing a failed `Result<T>` from a `Result<T>` whose value type
+happens to be `Error` itself.
+
+Status
+
+Frozen.
+
+---
+
+## Result / ResultVoid
+
+Decision
+
+`Result<T>` is `[[nodiscard]]`, embeds `Error` directly (no dynamic
+allocation for the error path), and exposes `HasValue()`, `Value()`,
+`Error()`, `operator*`, `operator->`, `operator bool`, and `Ignore()` (to
+explicitly discard a `[[nodiscard]]` result without warnings). Constructed
+explicitly from `T`/`Failure`, never implicitly. `ResultVoid` is the
+equivalent for functions that only need to report success/failure with no
+value.
+
+Reason
+
+Forge Core uses no exceptions, so every fallible function must communicate
+success/failure explicitly through its return type instead.
+
+Status
+
+Frozen.
+
+---
+
+## Assert
+
+Decision
+
+`FORGE_ASSERT(condition)` wraps `assert()` and is compiled out under
+`NDEBUG`. It exists to catch programmer errors during development, not to
+report recoverable runtime failures — that's what `Result<T>` is for.
+
+Status
+
+Frozen.
+
+---
+
+## Memory / Allocator
+
+Decision
+
+All allocation goes through the `memory::Allocator` interface
+(`Allocate(size, alignment)` / `Deallocate(memory, size, alignment)`).
+`Allocate` returns `nullptr` on failure rather than throwing.
+`Deallocate` must be called with the exact size/alignment used at
+allocation time. `DefaultAllocator` is the current concrete implementation,
+backed by `memory::detail::AllocationBackend`.
+
+Reason
+
+Centralizing allocation behind one interface is what makes it possible to
+later swap in arena/pool allocators, track memory, or sandbox allocation
+for the JS runtime without touching call sites.
+
+Status
+
+Frozen (interface). `new`/`delete`/`malloc`/`free` must never be used
+directly anywhere in Forge Core or code built on top of it.
+
+---
+
+## UniquePtr / MakeUnique
+
+Decision
+
+`UniquePtr` is an owning smart pointer built on top of `memory::Allocator`
+(not `std::allocator`/`new`), constructed via `MakeUnique<T>(...)`.
+
+Status
+
+Frozen.
+
+---
+
+## Vector
+
+Decision
+
+API frozen. Implementation frozen. Built on `memory::Allocator`, not
+`std::allocator`. Do not redesign.
+
+Status
+
+Frozen.
+
+---
+
+## Platform path handling (`forge/platform/`)
+
+Decision
+
+The earlier `forge/platform/` groundwork (`FilePath.cpp`,
+`PathNormalizer.cpp`, `SeparatorNormalizer.cpp`, Windows-specific
+`PathTraits.cpp`/`PathUtils.cpp`/`Platform.cpp`, and a parallel
+`include/forge/...` header tree) has been removed. Phase 3 (Filesystem)
+will design the path/filesystem layer from scratch rather than resuming
+this code.
+
+Reason
+
+Deliberate decision by the project owner (2026-07-26), not an accident —
+confirmed after the removal was flagged during a repo review (it showed up
+as an uncommitted deletion against commit `326d50e`).
+
+Status
+
+Removed. Do not resurrect this code from git history without checking with
+the project owner first; do not treat its absence as something to "fix."
+
+---
+
+## Codebase-wide compile/correctness pass (2026-07-26)
+
+Decision
+
+Every file in `forge/forge-core/` was reviewed and, where broken, fixed —
+this was the first time any of it had actually been compiled. Standalone
+`-fsyntax-only` and full runtime tests (under ASan+UBSan) now pass. Fixes
+made:
+
+* **`Result.inl` and `Vector.inl`**: both files closed
+  `namespace forge::core` far too early (right after the `Failure`
+  constructors in `Result.inl`, right after `Data()` in `Vector.inl`),
+  silently leaving most of the class's own member definitions (copy/move
+  ctors, assignment, `HasValue`/`Value`/`Error`, `Reserve`, `PushBack`,
+  etc.) sitting at global scope. Neither file could have compiled. Fixed
+  by moving the closing brace to the actual end of each file.
+* **`usize` was never declared.** `Allocator.h`, `DefaultAllocator.h/.cpp`,
+  and `Vector.h`'s `SizeType` alias all referenced `usize`; `Types.h` only
+  defines `Size`. Replaced every occurrence with `Size`.
+* **Include-path convention.** Most headers included each other via
+  `forge/core/...`, implying a `forge/core/` directory that does not
+  exist — the real directory is `forge/forge-core/` (hyphenated, one
+  level up). Only `AllocationBackend.h/.cpp` had the right idea (relative
+  to the real layout). Standardized everything on relative,
+  directory-correct includes. See `PROJECT_CONTEXT.md` → Coding Style.
+* **`Vector.h`'s own `.inl` include** pointed at a nonexistent
+  `forge/core/containers/Vector.inl`. Fixed to the real, same-directory
+  file.
+* **`UniquePtr::Reset()`** called `allocator_->Deallocate(pointer_)` with
+  one argument; `Allocator::Deallocate` requires `(memory, size,
+  alignment)`. Fixed to pass `sizeof(T), alignof(T)`.
+* **`UniquePtr`'s destructor** was declared without `noexcept` in the
+  header but defined with `noexcept` in the `.inl` — a hard
+  declaration/definition mismatch. Header now matches.
+* **`Error::OutOfMemory`** (in `MakeUnique.inl` and `Vector.inl`'s
+  `Reserve()`) doesn't exist — `Error` is a class with no such static
+  member; `OutOfMemory` is an `ErrorCode` enumerator. Fixed to
+  `Error(ErrorCode::OutOfMemory)`.
+* **`return Failure{...}` from functions returning `Result<X>`** doesn't
+  compile — `Result`'s `Failure`-taking constructor is `explicit`. Both of
+  the sites above now construct the `Result<X>` explicitly.
+* **`ResultVoid.h`/`ResultVoid.inl`** declared and separately defined
+  `Ignore()` twice in the same class (hard redefinition error). Removed
+  the duplicates.
+* **`Vector<T>::EmplaceBack`** was declared in `Vector.h` as returning
+  `Result<void>` but implemented in `Vector.inl` as returning `Result<T&>`
+  — which is itself ill-formed for any `T`, since `Result<T>`'s storage is
+  a `union { T value; Error error; }` and C++ forbids reference members in
+  unions. Implementation now matches the header (`Result<void>`).
+* **`Result<void>` has no `IsFailure()`** (only `HasValue()`/`HasError()`/
+  `operator bool()`); three call sites in `Vector.inl` used it anyway.
+  Fixed to `HasError()`. `HasError()` was also added to the primary
+  `Result<T>` template for symmetry (purely additive, non-breaking).
+* **Member-function name collides with an enclosing-scope type name**:
+  `Result<T>::Error()` / `Result<void>::Error()` / `Failure::Error()`
+  (returning `Error&`), and `Vector<T>::Size()` (returning `SizeType` =
+  `Size`) all hard-error under GCC (`-Wchanges-meaning`) the moment any
+  other bare use of the type name appears in the same class. Fixed with
+  the `class Error` elaborated-type-specifier for the `Error` cases, and
+  by fully qualifying `using SizeType = forge::core::Size;` for the
+  `Vector` case (elaborated specifiers don't apply to `using`-aliases).
+  The accessor names themselves were **not** renamed — see
+  `PROJECT_CONTEXT.md` and `AGENTS.md`.
+* **`Vector`'s copy constructor and copy-assignment** silently
+  `.Ignore()`d a failing `Reserve()` and then proceeded to construct/copy
+  `other.size_` elements regardless — on allocation failure this wrote
+  past an empty or undersized buffer (verified as a real crash/UB path
+  with a `FailingAllocator` test, not just a theoretical concern). Both
+  now bound the copy loop to `min(capacity_, other.size_)`, so a failed
+  allocation produces a safely-truncated (empty, in the OOM case) copy
+  instead of undefined behaviour.
+* **`moz.build`** listed `AllocationBackend.cpp` in `SOURCES` but not
+  `DefaultAllocator.cpp` (which calls into it) — the allocator subsystem
+  was never actually being built. Added it.
+* Minor: removed one dead/unreachable `argc < 2` check in `forge.cpp`
+  (unreachable given the `argc == 1` early-return at the top of `main`),
+  and fixed `ErrorTests.cpp`'s include to match the path convention above.
+
+Verification
+
+A standalone test translation unit including every forge-core header
+compiled cleanly under `g++ -std=c++20 -Wall -Wextra -Wpedantic -Werror`
+and `clang++`, and a runtime test (`Result<T>`/`Result<void>` success and
+failure paths and their copy/move; `Vector` push/emplace/copy/move/assign
+with a non-trivial element type, verifying construction/destruction counts;
+`Reserve()`/`PushBack()`/copy-assignment against a deliberately-failing
+allocator; `MakeUnique` success and out-of-memory paths) passed under
+`-fsanitize=address,undefined` with no leaks, no UB, exit code 0.
+
+Status
+
+Applied. Not yet reflected in any git commit on the user's machine as of
+this writing — these are working-tree changes.
+
+Noted but intentionally not changed (flagged for a future decision instead
+of a unilateral fix):
+
+* `MakeUnique(Allocator&, Args&&...)` vs `MakeUnique(Args&&...)`: passing a
+  custom `Allocator` subclass *by its derived type* (not upcast to
+  `Allocator&`) gets silently absorbed by the generic `Args...`-only
+  overload instead of routing to the allocator overload, producing a
+  confusing "no matching constructor" error instead of the intended
+  allocator substitution. Works correctly when the caller passes an
+  `Allocator&`-typed reference (the same convention `Vector`'s allocator
+  constructor already expects). Fixing this properly needs SFINAE/concepts
+  — a real API change, not something to do silently.
+* `ResultFwd.h`, `ResultVoid.h`, `ResultVoid.inl` physically live under
+  `forge-core/memory/` despite being core `Result` machinery (namespace
+  `forge::core`, not `forge::core::memory`) — not memory-specific. Include
+  paths were fixed to match their actual location; the files themselves
+  were not moved, since that's an organizational call, not a bug fix.
+* `Vector::AllocationSize()`/`NextCapacity()` have no overflow checking
+  for extreme capacities — a common, known limitation, left as-is to avoid
+  scope creep beyond what was asked.
+
+---
+
+## Platform / TimerScheduler (Phase 2, 2026-07-27)
+
+Decision
+
+`forge::core::platform::TimerScheduler` is the first piece of the Phase 2
+event-loop rearchitecture (see `ROADMAP.md`). It is deliberately split off
+from the actual Windows/IOCP backend: it holds only timer bookkeeping
+(`Schedule`, `Cancel`, `Empty`, `Count`, `NextDueDelay`, `PopDue`) over
+caller-supplied `u64` millisecond timestamps, with zero OS calls. The
+upcoming `IocpLoop` will wrap this and decide how long to block in
+`GetQueuedCompletionStatus` based on `NextDueDelay()`, then call `PopDue()`
+after waking. Backend selection between platforms will be a compile-time
+type alias (`#if defined(_WIN32)`), not a virtual interface — avoids vtable
+overhead on a hot path and avoids adding a converting/upcasting constructor
+to the frozen `UniquePtr<T>`.
+
+Reason
+
+Everything OS-specific (real IOCP calls) cannot be compiled or tested in
+the Linux sandbox this work was verified in, and would need to wait for
+the project owner's Windows/Visual Studio machine either way. Splitting
+out the pure logic means the part that's actually easy to get subtly wrong
+(due-time bookkeeping, safe removal-during-iteration, re-entrant
+Schedule/Cancel from inside a firing callback) gets fully verified now
+instead of being tangled up with untestable Win32 glue.
+
+Verification
+
+A dedicated test (`TimerSchedulerTest.cpp`, kept alongside the class as a
+throwaway harness, not part of the `moz.build` production build) covers:
+one-shot timers firing exactly once and being removed; a repeating timer
+firing multiple times with correctly-advancing due times, including under
+late polling; cancelling a timer before it's due; cancelling a *different*
+timer from within another timer's callback, both a still-pending target
+and an already-fired-and-removed one; a repeating timer cancelling
+*itself* from within its own callback and confirming it does not fire
+again; `NextDueDelay` reporting the correct minimum across several
+concurrent timers and `false` once none are pending; and scheduling new,
+already-due timers from within a callback mid-`PopDue`, forcing the
+backing `Vector` to reallocate while the sweep's own index is live.
+
+Passed under `g++`/`clang++ -std=c++20 -Wall -Wextra -Wpedantic -Werror`,
+under `g++ -fsanitize=address,undefined` (0 errors), and under `valgrind
+--leak-check=full` (0 errors, 0 leaks). clang's ASan runtime library was
+not installed in this sandbox, so the clang+ASan combination specifically
+was not exercised — covered instead by g++ + ASan/UBSan plus valgrind.
+
+Two real bugs were found and fixed during this pass, not just theoretical
+review:
+
+* **`Vector.h` never included `DefaultAllocator.h`** despite its default
+  member initializer calling `memory::GetDefaultAllocator()` (declared
+  there, not in `Allocator.h`, which `Vector.h` *did* include). This had
+  never been caught before because every prior compile of `Vector.h`
+  happened to have something else include `DefaultAllocator.h` first in
+  the same translation unit — an accident of include order, not a
+  guarantee. `TimerScheduler.h` including `Vector.h` on its own, with
+  nothing else pulling in `DefaultAllocator.h` first, is what exposed it.
+  Fixed by adding the include directly to `Vector.h`.
+* **`TimerScheduler::PopDue()`'s repeating-timer reschedule anchored the
+  next due time to `nowMs`** (the timestamp passed into that `PopDue`
+  call) **instead of to the timer's own previous `dueMs`** — the opposite
+  of what the header comment documents ("measured from when it was due,
+  not from when `PopDue()` happened to run"). Anchoring to `nowMs` lets
+  the effective period drift longer every time `PopDue` is called even
+  slightly late. Caught by `Test_RepeatingTimerAdvancesDueTime`
+  deliberately calling `PopDue` late (at t=23 for a timer due at t=20) and
+  asserting the *next* due time is still 30, not 33. Fixed by anchoring to
+  `fired.dueMs + fired.delayMs`.
+
+Status
+
+`TimerScheduler.h`/`.cpp` verified and applied.
+
+---
+
+## Platform / IoLoop + IocpLoop (Phase 2, 2026-07-27)
+
+Decision
+
+`forge::core::platform::IoLoop` (`IoLoop.h`) is the compile-time backend
+alias called for in `ROADMAP.md` Phase 2 — `#if defined(_WIN32)` selects
+`IocpLoop`; any other platform is a hard `#error` until a Linux/macOS
+backend is written, rather than silently compiling something broken.
+
+`IocpLoop` (`IocpLoop.h`/`.cpp`) wraps a single Win32 I/O completion port
+plus a `TimerScheduler`. It is single-threaded by design — exactly one
+thread ever calls `Run()`/`RunOnce()`, matching the single-threaded JS
+event-loop model every other engine (V8/Node, JavaScriptCore/Bun) also
+uses; blocking or CPU-heavy work belongs on the Phase 7 thread pool, not
+here. Async operations are represented by `IoCompletion` (a struct
+inheriting from `OVERLAPPED` with an inline `CompletionCallback` function
+pointer) that future socket/file code (Phase 5/6) embeds as the first
+member of its own per-operation struct — the standard IOCP idiom of
+casting the `LPOVERLAPPED` handed back by `GetQueuedCompletionStatus`
+straight back to the callback that should handle it, with no virtual
+dispatch and no lookup table. `RunOnce()` computes its wait timeout from
+`TimerScheduler::NextDueDelay()` so the loop blocks exactly as long as
+until the next timer or I/O event, never polling.
+
+Reason
+
+Same reasoning as `TimerScheduler`: get the shape of the loop right once,
+now, since every future async API (files, sockets, HTTP) builds on top of
+it and retrofitting it later would mean touching all of them.
+
+Verification
+
+The real Win32 calls (`CreateIoCompletionPort`, `GetQueuedCompletionStatus`,
+`PostQueuedCompletionStatus`, etc.) cannot be compiled or executed in this
+Linux sandbox — there is no Windows SDK here. Two separate checks were
+still run, both clearly scoped to what they do and don't prove:
+
+* A minimal mock `windows.h` (stub types/signatures only, every function
+  a one-line no-op) type-checked `IocpLoop.cpp` and `IoLoop.h` (with
+  `_WIN32` defined) under `g++`/`clang++ -Wall -Wextra -Wpedantic -Werror`.
+  This only proves the code is syntactically and type-correct against the
+  real Win32 signatures it calls — it says nothing about runtime
+  behaviour.
+* A second, *stateful* mock `windows.h` backs `GetQueuedCompletionStatus`/
+  `PostQueuedCompletionStatus` with a real (fake-OS, single-threaded) FIFO
+  queue, so `IocpLoopTest.cpp` could actually drive `IocpLoop`'s own
+  control flow end-to-end: a posted completion dispatches on the next
+  `RunOnce()` with the right bytes-transferred/completion-key/success
+  values; a *failed* completion (operation error, but a real dequeue —
+  `GetQueuedCompletionStatus`'s documented third outcome) still dispatches,
+  with `succeeded=false` and the right error code, and is not treated as a
+  `RunOnce()`-level failure; a due timer fires even when no completion is
+  queued (mock "timeout" path); a timer and a completion both firing in
+  the same sweep both get handled; a genuine wait failure (as opposed to a
+  plain timeout) surfaces as a `Result<void>` error from `RunOnce()`; and
+  `RequestStop()` called from inside a completion callback stops `Run()`
+  after that iteration, not before or after an extra one. All 7 scenarios
+  passed under `g++`/`clang++ -Wall -Wextra -Wpedantic -Werror`, under
+  `g++ -fsanitize=address,undefined`, and under `valgrind --leak-check=full`
+  (0 errors, 0 leaks in every run). This is real verification of
+  `IocpLoop.cpp`'s own logic — the branching on
+  `GetQueuedCompletionStatus`'s three outcomes, the `OVERLAPPED*` ↔
+  `IoCompletion*` cast, timer/completion interleaving — just not of the
+  real OS's behaviour underneath it.
+
+Status
+
+`IoLoop.h`, `IocpLoop.h`, `IocpLoop.cpp` written and logic-verified against
+mocks as described above. **Confirmed building and passing on the project
+owner's actual Windows/Visual Studio machine (2026-07-27)** via
+`IocpSmokeTest.cpp` — real `CreateIoCompletionPort`,
+`GetQueuedCompletionStatus`, `PostQueuedCompletionStatus`, a real repeating
+timer, and `RequestStop()` all confirmed working against the real Win32
+API, not just the mock. `Empty()`/`Count()` (pass-through accessors onto
+`TimerScheduler`, needed by the `forge.cpp` integration below to know when
+it's safe to stop the loop) were added afterward and are covered by
+`IocpLoopTest.cpp` against the mock, but have not themselves been
+re-verified on Windows — low risk (trivial one-line delegations), but
+worth confirming alongside the `forge.cpp` integration's own build.
+
+---
+
+## forge.cpp — wiring IocpLoop into the real runtime (2026-07-27)
+
+Decision
+
+`forge.cpp`'s old `TimerQueue`/`EventLoop` (busy-poll, 1ms sleep, manual
+`now() >= dueTime` scanning) is replaced with
+`forge::core::platform::IoLoop`. `setTimeout`/`setInterval`/`clearTimeout`
+keep their exact existing JS-facing behaviour (same small integer ids
+returned to script) but now schedule through `IoLoop::ScheduleTimer` /
+`CancelTimer` instead of a manually-scanned vector. `Runtime::run()`
+drains the JS job queue, then blocks in `IoLoop::RunOnce()` for the next
+timer or I/O event (currently only timers — real async I/O is Phase 5/6),
+repeating until both the job queue and the timer set are empty, instead of
+looping with a fixed sleep regardless of whether anything is actually due.
+
+Two id spaces are kept separate on purpose: the small integer
+`setTimeout()`/`setInterval()` return to script is unrelated to `IoLoop`'s
+own `TimerId`; a `JsTimerRegistry` maps between them.
+
+Reason
+
+This is the actual point of Phase 2 — replacing the wasteful polling loop
+this whole rearchitecture was about, now that `IocpLoop` itself is
+confirmed working for real.
+
+Two real bugs, unrelated to `IocpLoop` itself, were found and fixed while
+writing this integration — not just in review, both were things that would
+either fail to compile or corrupt memory if shipped as first drafted:
+
+* **A forward-declaration ordering bug of my own making, caught before
+  compiling, not after**: `ForgeTimerFired` (the native-timer-fired
+  callback) needs to reach the current `Runtime`'s `JsTimerRegistry` to
+  release a fired one-shot timer, but `Runtime` is only fully defined
+  later in the file (it embeds `JsTimerRegistry` by value). Fixed with a
+  forward-declared `GetRuntimeTimers()` helper, the same pattern the file
+  already used for `EnqueueMicrotask`.
+* **A real lifetime/memory-safety bug**: the old event loop only ever
+  stopped once every timer had already fired or been cancelled, so it
+  never needed an early-exit path. The new `run()` can now `break` early
+  on a genuine I/O error from `IoLoop::RunOnce()` — and if it does, any
+  `JsTimer`s still pending hold a `JS::PersistentRootedVector<JS::Value>`,
+  which must unregister itself from `cx` when destroyed. Left alone, those
+  would only get destroyed later, inside `Runtime`'s own destructor, which
+  runs *after* `JS_DestroyContext(cx)`/`JS_ShutDown()` have already been
+  called at the bottom of `main()` — a destroy-after-teardown bug. Fixed
+  by adding `Runtime::Shutdown()` (cancels and releases every pending
+  timer) called explicitly, while `cx` is still alive, right before
+  `JS_DestroyContext(cx)` — and also on the one other path that can leave
+  timers pending before reaching that point (a script that calls
+  `setTimeout` and then throws during top-level evaluation).
+
+Also fixed in passing, since it directly concerns the exact callback
+objects this rewrite revolves around: **neither `Timer::callback` nor
+`Microtask::callback` (`JS::Heap<JSObject*>`) was ever traced by the
+GC.** `JS::PersistentRootedVector` (used for `arguments`) self-registers
+and needs no manual tracing, but a bare `JS::Heap<T>` member does — without
+a trace hook, a GC that runs while a timer or microtask is still pending
+could collect its callback out from under it. Fixed by registering a
+`JS_AddExtraGCRootsTracer` callback (`TraceForgeRoots`) that traces every
+live timer's and microtask's callback. This bug pre-dates this change
+entirely (it's been there since the original prototype) — it was only
+found now because rewriting the timer storage was the moment to look at it
+closely.
+
+Verification
+
+**This could not be compiled or tested in this sandbox at all** — unlike
+`IocpLoop.cpp`, where a small, precisely-known Win32 API surface (about 10
+functions) could be faithfully mocked, `forge.cpp` calls deeply into
+SpiderMonkey's own API (`JS::Call`, `JS::CallArgs`, rooting, realms,
+compilation, GC tracing), a much larger and more version-sensitive
+surface. Building a mock of that would risk asserting false confidence
+rather than providing real signal, so none was attempted. What *was* done:
+a full manual re-read of the rewritten file for control-flow ordering,
+lifetime, and GC-safety (which is how the two bugs above were caught
+before ever reaching the project owner), reusing the exact call shapes
+already proven to compile in the pre-existing code (e.g. the
+`JS::Call(cx, thisValue, callback, timer->arguments,
+JS::MutableHandleValue(&rval))` shape is copied verbatim from the working
+original), and a brace/paren balance check. The two genuinely new
+SpiderMonkey API calls introduced here — `JS_AddExtraGCRootsTracer` (in
+`js/GCAPI.h`) and `JS::TraceEdge` (in `js/TracingAPI.h`) — are the most
+likely spots for a real build to disagree with, if anything does.
+
+Status
+
+Written, not yet built. **Needs a real build on the project owner's
+Windows/Visual Studio machine** — same as every other unverifiable-here
+change, please report back exactly what the compiler says if anything
+doesn't build, especially around the two new GC-tracing calls called out
+above.
+
+---
+
+## Real build environment discovered: C++17, no exceptions, not C++20 (2026-07-27)
+
+Decision
+
+The first real `mach build` attempt (via the actual Gecko/SpiderMonkey
+tree at `js/src/forge`, not a standalone Visual Studio project) revealed
+that this build target is **not** what every prior verification in this
+project assumed. Every earlier "compiles cleanly" claim in this file used
+`g++`/`clang++ -std=c++20` in the sandbox, and the standalone Visual
+Studio smoke tests (`VectorSmokeTest.cpp`, `IocpSmokeTest.cpp`) apparently
+used a project configuration with C++20 and exceptions both enabled. The
+real `mach build`, however:
+
+* Compiles this codebase as C++17, not C++20 (evidenced by
+  `-Wc++20-extensions` warnings on things that are only valid in C++20).
+* Disables C++ exceptions entirely (`error: cannot use 'try' with
+  exceptions disabled`) — not a style preference, a hard compiler
+  configuration that makes `try`/`catch`/`throw` a compile error wherever
+  they appear unconditionally.
+
+This is a real, load-bearing fact about the project now: **forge-core
+must compile as strict C++17, with exceptions disabled, in the real
+build** — even though a standalone Visual Studio project pointed at the
+same files might successfully compile more permissive C++20-or-exceptions
+code and never reveal the mismatch. From here on, verification in this
+sandbox uses `-std=c++17 -fno-exceptions` to actually match, instead of
+`-std=c++20`.
+
+Six real bugs, spanning most of forge-core, were caused by this mismatch
+and are now fixed:
+
+* **`ResultStorage.h`'s union constructor/destructor were `constexpr`.** A
+  constexpr destructor (and a constexpr union constructor that doesn't
+  initialize a member) are both C++20-only. Neither one is ever needed in
+  a constant-evaluated context anywhere in this codebase, so `constexpr`
+  was simply removed from both.
+* **`Error.h`'s `operator==` used `= default`** on a non-member/friend
+  comparison operator — C++20's "defaulted comparisons" feature. Replaced
+  with an explicit, hand-written member-wise comparison (same semantics,
+  valid since C++11).
+* **`std::construct_at` (C++20, `<memory>`) was used 19 times** across
+  `Result.inl`, `Vector.inl`, and `MakeUnique.inl`. Added a small
+  C++17-compatible replacement, `forge::core::detail::ConstructAt()` (new
+  file, `Construct.h` — plain placement-new under the hood, same call
+  shape as `std::construct_at` so every call site is a mechanical
+  substitution) and switched every call site to it.
+* **`memory/detail/AllocationBackend.cpp` used `std::has_single_bit`**
+  (C++20, `<bit>`) to check that an alignment is a power of two. Replaced
+  with the equivalent bit trick (`(alignment & (alignment - 1)) == 0`),
+  which is plain C++11.
+* **The same file wrapped the actual allocation in an unconditional
+  `try`/`catch (const std::bad_alloc&)`**, which cannot compile at all
+  with exceptions disabled — not merely non-idiomatic for a
+  zero-exception codebase (see `AGENTS.md`), a hard build failure.
+  Replaced with the standard non-throwing overload,
+  `::operator new(size, align_val_t, std::nothrow)` (C++17), which needs
+  no exception handling at all. `MakeUnique.inl`'s own `try`/`catch` was
+  **not** touched beyond the `construct_at` fix — it was already correctly
+  guarded behind `#if defined(__cpp_exceptions)` (that macro is
+  undefined when exceptions are disabled, exactly as it should be), so it
+  already compiles correctly in both configurations; it just also needed
+  the same `construct_at` fix as everywhere else.
+
+Verification
+
+Every fix was re-verified the same rigorous way as before, but now under
+the conditions that actually matter — `-std=c++17 -fno-exceptions` — not
+`-std=c++20`:
+
+* `TimerScheduler` + its full test suite: g++ and clang++, strict warnings
+  (including `-Wc++20-extensions` explicitly enabled, to catch anything
+  else relying on a C++20 extension), and `-fsanitize=address,undefined`.
+  All 7 scenarios still pass.
+* `IocpLoop` + its full mock-based test suite: same treatment, all 8
+  scenarios still pass.
+* `Vector<T>`: a fresh standalone check (push/emplace/copy/move on both a
+  trivial and a non-trivial element type) under the same flags, plus ASan.
+* `MakeUnique<T>`: a fresh standalone check (success path, value
+  correctness) under the same flags, plus ASan.
+
+All four passed clean, with zero warnings, under the real constraints this
+time.
+
+Status
+
+Fixed. This is a significant finding beyond just these six bugs: it means
+the actual build environment (Gecko's `mach build`) is meaningfully
+stricter than anything verified here or in a standalone Visual Studio
+project until now. Any future forge-core code — written by any AI agent
+per `AGENTS.md`, not just this fix — needs to be written as plain C++17
+with no exceptions from the start, not C++20-with-exceptions code that
+happens to also compile in a more permissive standalone test project. This
+should be checked into `AGENTS.md` as a hard constraint, not just this
+history entry.
+
+---
+
+## First successful real `mach build` of the new event loop (2026-07-27)
+
+Decision / Milestone
+
+`python mach build`, run for real from `C:\spidermonkey-dev\gecko-dev`,
+succeeded: `js/src/forge/forge.exe` now builds cleanly with `TimerScheduler`,
+`IocpLoop`, `IoLoop`, and the rewired `forge.cpp` all included, after the
+C++17/no-exceptions fixes above. Output binary lands at
+`obj-spider\dist\bin\forge.exe` (per `build.bat`/`install.ps1`'s existing
+copy step), not directly under `js/src/forge`.
+
+This is the first time any of Phase 2's actual code has been built by the
+real toolchain end to end — everything before this was either sandbox
+verification (g++/clang++ against mocks) or a standalone Visual Studio
+smoke test (`IocpSmokeTest.cpp`) that only covers `IocpLoop` in isolation,
+not `forge.cpp`'s integration of it into the real JS runtime.
+
+Status
+
+Builds successfully. **Functionally verified against real `hello.js`
+(2026-07-27):** `forge.exe hello.js` printed `hello` exactly once (one-shot
+timer fires once, doesn't repeat), then `tick` repeatedly with no crash
+(the uncancelled `setInterval` keeps firing correctly through the new
+loop), and never printed `never` (the timer `clearTimeout`'d before it was
+due was genuinely cancelled). This is real confirmation that
+`setTimeout`/`setInterval`/`clearTimeout` work correctly end-to-end
+through `IocpLoop` — not just that the code compiles. Running long enough
+to see many repeated ticks without a crash is also reasonable (if not
+airtight) evidence the GC-tracing fix is holding up under whatever GC
+pressure SpiderMonkey's normal allocation-triggered collection produced
+during the run; a more deliberate GC-pressure test would need a way to
+force a collection from script, which isn't exposed yet.
+
+Still open: the 47 compiler warnings from the build haven't been reviewed
+to confirm none originate from forge/forge-core's own files.
+
+---
+
+## Crash on every finite script: `global` destroyed after `JS_DestroyContext` (2026-07-27)
+
+Decision / Bug
+
+Running the Phase 0 benchmark suite (`run-benchmarks.ps1`) for the first
+time against the real `forge.exe` crashed on all three scripts
+(`startup.js`, `json-bench.js`, `loop-bench.js`), every time, with exit
+code `-1073741819` (`0xC0000005` — access violation). This is **not**
+related to timers, `IocpLoop`, or anything from this session's event-loop
+work — none of the three scripts schedule a single timer.
+
+Root cause: `JS::RootedObject global` was declared at the top level of
+`main()`, alongside `cx`/`runtime`, so its destructor only runs when
+`main()` itself returns — which is *after* `JS_DestroyContext(cx)` and
+`JS_ShutDown()` have already executed a few lines earlier.
+`JS::Rooted<T>`'s destructor has to unlink itself from a list owned by the
+context it was rooted against; with that context already destroyed, this
+is a genuine use-after-free, matching the observed access violation
+exactly.
+
+This bug **pre-dates every change made this session** — `global` was
+declared at that same scope in the very first version of `forge.cpp` ever
+read in this project. It had simply never been triggered, for a subtle
+reason worth recording: no script had ever been run to natural completion
+through a real `mach`-built `forge.exe` before now. `hello.js` (the only
+prior real-build test) schedules an uncancelled `setInterval`, so `run()`
+never returns on its own — the user always had to Ctrl+C it, which kills
+the process immediately without ever running C++ destructors or reaching
+`JS_DestroyContext`. The Phase 0 benchmark scripts are finite (no pending
+timers), so they're the first scripts to ever actually reach the bottom of
+`main()` — and that's exactly what exposed this.
+
+Fix
+
+Wrapped `global`'s declaration (and everything using it, including the
+existing `JSAutoRealm` block) in a new nested scope that closes *before*
+`runtime.Shutdown()`/`JS_DestroyContext(cx)`/`JS_ShutDown()` run, instead
+of after. No other logic changed.
+
+Verification
+
+**Could not be compiled or run here** — same SpiderMonkey-API-surface
+constraint as the rest of `forge.cpp` (see the C++17/no-exceptions entry
+above): the API surface is too large to mock faithfully, so no sandbox
+verification was attempted. What gives this fix unusually high confidence
+despite that: the crash signature (access violation, only on scripts that
+reach normal completion, first appearing on the very first finite scripts
+ever run) matches this exact, well-known SpiderMonkey embedding pitfall
+precisely, and the fix is a pure scope/ordering change — no new API calls,
+no new logic, just moving where a brace closes.
+
+Status
+
+Fixed and confirmed on the project owner's machine (2026-07-27) —
+`run-benchmarks.ps1` now runs all three scripts to completion with no
+crash, on both the old busy-poll path and (implicitly) whatever code path
+these scripts exercise now. Diagnosis was correct.
+
+---
+
+## Phase 0 baseline established: first real Forge vs Bun vs Node numbers (2026-07-27)
+
+Result (from `run-benchmarks.ps1`, 5 iterations each, see
+`bench/results/2026-07-27_162925.csv` for the raw data):
+
+| benchmark     | forge (avg) | bun (avg) | node (avg) | forge/bun ratio |
+|---------------|-------------|-----------|------------|-----------------|
+| startup.js    | 25.01 ms    | 47.35 ms  | 53.85 ms   | **0.53x**       |
+| json-bench.js | 383.29 ms   | 264.53 ms | 566.12 ms  | 1.45x           |
+| loop-bench.js | 89.96 ms    | 81.23 ms  | 103.21 ms  | 1.11x           |
+
+Reading
+
+`startup.js` measures process cold-start — engine init, global/realm
+setup, the event loop coming up — which is exactly the layer Phase 2's
+work (and Forge's minimal footprint generally, vs. Bun's much larger
+feature set at startup) actually controls. **Forge starts in about half
+the time Bun does.** This is the first real evidence the architecture
+decisions so far (SpiderMonkey + the lean event loop rewrite) are paying
+off where they're supposed to.
+
+`json-bench.js` and `loop-bench.js` are the two benchmarks explicitly
+flagged in their own source comments as measuring the underlying JS
+*engine* (SpiderMonkey vs JavaScriptCore), not anything Forge's own
+runtime layer currently touches — Forge hasn't done any engine-level or
+built-in-fast-path work yet (that's later phases, if ever, per
+`ROADMAP.md`). Unsurprisingly, stock SpiderMonkey trails stock
+JavaScriptCore by 11–45% on these; what's notable is Forge still clearly
+beats Node on both (32% faster on `json-bench.js`, 13% faster on
+`loop-bench.js`), and the startup win suggests there's real headroom in
+what Forge's *own* layer can still contribute once Phase 1
+(String/Span), Phase 3 (allocator hardening), and Phase 6 (native
+networking/HTTP fast paths) land on top of this foundation.
+
+Status
+
+Phase 0 is now genuinely complete: real baseline numbers exist, not just
+benchmark scripts sitting unused. This is the number to track as every
+later phase lands — especially whether `json-bench.js`/`loop-bench.js`
+close the gap with Bun as forge-core's own allocator/collection work
+matures, since those two are the ones current work can plausibly still
+move.
+
+---
+
+## Span / StringView / String (Phase 1, 2026-07-27)
+
+With Phase 0 (baseline) and Phase 2 (event loop) both landed, the next
+piece of `ROADMAP.md`'s own Phase 1 — `String`/`StringView`/`Span` — was
+implemented: the last of the "not started" core containers listed in
+`PROJECT_CONTEXT.md`.
+
+`Span<T>` is a generic non-owning view (`Data`/`Size`/`Empty`/
+`operator[]`/`Front`/`Back`/`Subspan`, the last clamped so an
+over-generous offset/count can't read out of bounds — the common "give
+me the rest" mistake via a huge count shouldn't be UB). `StringView` is
+built on `Span<const char>` rather than duplicating its bounds logic,
+adding the string-specific vocabulary (`Substr`/`StartsWith`/`EndsWith`/
+`Find`/comparisons/implicit construction from a null-terminated
+`const char*`). `String` is the owning, growable, `Allocator`-based
+counterpart, deliberately mirroring `Vector<T>`'s exact growth/`Reserve`/
+`GrowIfNeeded`/copy-truncates-safely-on-OOM conventions, but always
+maintaining a null terminator internally (`AllocationSize(capacity) =
+capacity + 1`) so `CStr()` is always valid — including on a
+default-constructed String that has never allocated — for interop with
+C-style APIs. Construction never allocates; `String::Create(allocator,
+initial)` / `String::Create(initial)` are the fallible factories for a
+String that already holds content, per the decision already recorded
+above this entry.
+
+Verified with a new `StringTest.cpp` (13 scenarios: happy-path
+construction/append/copy/move/assignment, cross-type comparisons, and
+three allocator-failure paths via a `FailingAllocator`, mirroring
+`Vector<T>`'s own OOM-test precedent) under the real project
+constraints established in the C++17 entry above: `g++`/
+`clang++ -std=c++17 -fno-exceptions -Wall -Wextra -Wpedantic -Werror`
+(plus `-Wc++20-extensions` on clang), then re-run clean under
+`-fsanitize=address,undefined` and `valgrind --leak-check=full` (0
+errors, 21 allocs/21 frees, no leaks possible), plus an `-O2` pass for
+good measure. Not yet retested via a real `mach build` — these are pure
+header/`.inl` files with no SpiderMonkey dependency, so this sandbox
+verification is materially more trustworthy than the `forge.cpp`/
+event-loop work's was, but per `AGENTS.md` that's still not "confirmed"
+until it's actually gone through Gecko's build.
+
+Two real bugs, caught by this verification rather than by inspection:
+
+* **`String.h` never included `Result.h`.** It included
+  `memory/ResultVoid.h` (for the `Result<void>` specialization) but not
+  the primary `Result<T>` template's own header, relying only on the
+  forward declaration in `ResultFwd.h`. That's enough for a function
+  *declaration* like `static Result<String> Create(...)`, but
+  `String.inl`'s function *bodies* actually construct and return a
+  `Result<String>`, which requires the primary template to be a
+  complete type. Fixed by adding `#include "Result.h"` to `String.h`.
+* **`String == String` did not compile**, despite a comment in `String.h`
+  confidently asserting it would "just work" via the implicit
+  `String -> StringView` conversion plus `StringView`'s own
+  `operator==`. It doesn't: `StringView::operator==` is a *hidden
+  friend* (declared only inside the class body, no matching
+  namespace-scope declaration), and hidden friends are only found by
+  argument-dependent lookup when the declaring class itself
+  (`StringView`) is literally one of the call's argument types — not
+  merely reachable via an implicit conversion from a *different* class
+  in the same namespace. Since `String == String` has no `StringView`
+  argument at all, `StringView`'s comparison operator was never
+  considered, and gcc rejected it outright
+  ("no match for 'operator=='"). Fixed by giving `String` its own three
+  hidden-friend overloads (`String==String`, `String==StringView`,
+  `StringView==String`), each delegating to `.View() == ...`; a bare
+  `String == "literal"` still resolves correctly through these, since
+  the literal has no class type to constrain ADL and the `String`
+  operand pulls the friend in regardless. The stale comment claiming the
+  old approach worked was removed.
+
+Separately, while staging these new files to the device, the two
+tracked copies of this repo were found to have drifted: the C++17/
+no-exceptions fixes from the entry above (`Construct.h`, and the fixes
+to `Error.h`, `Result.inl`, `ResultStorage.h`, `memory/MakeUnique.inl`,
+`memory/Vector.inl`, `memory/detail/AllocationBackend.cpp`) had only
+ever been written to `C:\spidermonkey-dev\gecko-dev\js\src\forge\`
+(the real `mach build` location) and never mirrored back to
+`C:\forge-beta\forge-runtime-beta\` — so the latter's `forge-core` was
+silently back to the pre-fix, C++20-assuming state. Synced all seven
+files back to `C:\forge-beta\forge-runtime-beta\` alongside this
+entry's new files, so both locations match again. Worth remembering:
+this repo effectively has two live copies with no automatic sync
+between them, and it's easy for a fix delivered to only one of them to
+silently go stale in the other.
+
+Status
+
+`Span`/`StringView`/`String` implemented and verified (sandbox, not yet
+`mach build`). `ROADMAP.md`'s Phase 1 is marked done. Next candidates
+per `ROADMAP.md`: Phase 2 (Array/HashMap/HashSet/Queue/Stack), or,
+per the broader runtime roadmap referenced elsewhere in this file,
+Phase 3 (allocator hardening) or reviewing the 47 `mach build` warnings
+that have never been triaged (still outstanding — the warning text has
+not yet been provided).
+
+---
+
+## Pre-work review: forge.cpp/moz.build drift, a real missing-sources bug (2026-07-29)
+
+Before starting Phase 2, reviewed the current state of both tracked
+copies (`C:\forge-beta\forge-runtime-beta\` and
+`C:\spidermonkey-dev\gecko-dev\js\src\forge\`) against `ROADMAP.md`, per
+this session's own instructions to check for drift/duplication before
+adding new code. Found two real, separate problems:
+
+**`forge.cpp` and `moz.build` were never synced back to `forge-beta`.**
+The prior session's entry above only says `forge.cpp` (the full
+IocpLoop-rewrite/crash-fix version) was delivered to the `gecko-dev`
+build location — unlike the `forge-core/` files, it was never mirrored
+to `forge-beta`. Confirmed via `diff`: `forge-beta`'s copy was still the
+pre-rewrite prototype (`std::vector<std::unique_ptr<Microtask>>`, no
+`IoLoop`, no crash fix). Synced the current `gecko-dev` version back.
+
+**`moz.build`, independently, was missing two `SOURCES` entries it
+needs.** The live `moz.build` at the real build location listed
+`forge-core/memory/DefaultAllocator.cpp`,
+`forge-core/memory/detail/AllocationBackend.cpp`, and `forge.cpp` —
+but not `forge-core/platform/IocpLoop.cpp` or
+`forge-core/platform/TimerScheduler.cpp`, even though `forge.cpp`
+`#include`s `IoLoop.h` and directly constructs/calls into
+`forge::core::platform::IoLoop` (== `IocpLoop` on Windows), and neither
+file is header-only. This entry's earlier prose says these two lines
+were added and a `mach build` succeeded with them present — so at some
+point after that success, `moz.build` reverted to a 3-entry `SOURCES`
+list missing both platform files, most likely from stale linked object
+files papering over the missing sources on an incremental build rather
+than a clean one. However it happened, a `mach clobber` or a build on a
+clean checkout would almost certainly have hit a linker error for
+undefined `IocpLoop`/`TimerScheduler` symbols. Added both lines back to
+`moz.build` and synced the fix to both locations. Worth a rebuild to
+confirm before relying on it further.
+
+Also noticed (lower priority, fixed while here): `forge/CMakeLists.txt`
+(a local, non-`mach`, IDE/CMake build for `VectorTest`) still set
+`CMAKE_CXX_STANDARD 20` — exactly the assumption the C++17 entry above
+found to be wrong for the real build. Changed to 17 so building
+`VectorTest` locally via CMake doesn't mask a C++20-only construct that
+`mach build` would reject, the same trap that caused the whole C++17
+investigation in the first place.
+
+No code changes resulted from this review beyond the sync/fixes above —
+`Array`/`HashMap`/`HashSet`/`Queue`/`Stack` were confirmed genuinely not
+started (no files present at either location), so Phase 2 work below
+does not duplicate anything.
+
+---
+
+## Array / Hash / Stack / Queue / HashMap / HashSet (Phase 2, 2026-07-29)
+
+Implemented all five `ROADMAP.md` Phase 2 components, plus a new `Hash<T>`
+trait (`Hash.h`) that `HashMap`/`HashSet` need but that didn't fit neatly
+under any single one of the five names.
+
+`Array<T, N>` is the one deliberate departure from every other
+container's private-members-plus-named-accessors convention: it's a
+plain aggregate with a public `T data_[N]`, matching `std::array`'s own
+reasoning — a fixed-size array has no size/capacity relationship to
+protect (unlike `Vector<T>`, where `size_ <= capacity_` is exactly the
+invariant the private members exist to guard), so there's no invariant
+for an accessor to be defending. `N == 0` needed a separate template
+specialization (holding no storage at all) since a zero-length C array
+isn't valid C++.
+
+`Stack<T>` is a thin LIFO adapter directly over `Vector<T>` — no new
+storage logic. `Queue<T>` is a real circular buffer rather than a second
+`Vector`-backed adapter: a `Vector`-backed FIFO would need an O(n) shift
+on every `Pop()` to slide the remaining elements down, so `Queue<T>`
+tracks its own `head_` and wraps indices with modulo, same
+`Allocator`/`Reserve`/copy-truncates-on-OOM conventions as `Vector<T>`
+otherwise (growth linearizes the circular layout back to starting at
+index 0 in the new buffer).
+
+`Hash<T>` (new) is FNV-1a for byte ranges (`StringView`/`String`) and a
+splitmix64-style finalizer for integers before they're masked to a table
+index — plain identity hashing of small sequential integers (0, 1, 2,
+...) would cluster badly against the power-of-two table sizes `HashMap`
+uses. The primary template is deliberately left undefined rather than
+falling back to hashing a type's raw bytes: a key type without an
+explicit `Hash<K>` specialization should fail to compile with a clear
+"no such specialization" error, not silently hash padding bytes or fail
+confusingly deep inside `HashMap`'s internals.
+
+`HashMap<K, V>` is open addressing with linear probing and tombstones
+for deletion (find scans through tombstones; insert reuses the first one
+seen along the probe sequence) — chosen over a more elaborate
+Robin-Hood/SwissTable-style design specifically because
+`PROJECT_CONTEXT.md` calls out "readability over cleverness," and linear
+probing with tombstones is the version of open addressing most people
+can read and verify by eye. Table capacity is always a power of two so
+the index is `hash & (capacity - 1)` (masking) rather than a modulo;
+growth doubles capacity once `size + tombstones` crosses 75%, counting
+tombstones because a table full of tombstones is exactly as slow to
+probe as one full of live entries. Copy construction/assignment reuse
+`Insert()` itself (rather than a raw indexed copy loop the way
+`Vector`/`String` do it) — `Reserve()` best-effort up front, then insert
+every source entry, stopping early if `Insert()` starts failing; this
+reaches the same truncate-safely-on-OOM outcome as the rest of the
+codebase's containers, just via composition instead of manual memory
+copying. Deliberately does not (yet) support a custom hasher/
+key-equality template parameter, or const iteration — both are ordinary
+additions when a concrete caller actually needs them, left out for now
+per "small, clean API."
+
+`HashSet<K>` is a thin wrapper around `HashMap<K, detail::Unit>` (a new
+empty tag type), not a second, independent table implementation — any
+future correctness fix or improvement to `HashMap`'s probing/growth
+applies to `HashSet` automatically, at the cost of one `Unit`-sized slot
+per entry that a hand-written set wouldn't need to store. Considered
+building both on top of a single shared internal template instead
+(avoiding even that overhead), but `V = void` isn't legal C++ and the
+`[[no_unique_address]]` trick that would elide it outright is a C++20
+feature this codebase can't use — the composition-over-`HashMap`
+approach was the simplest one that stayed within the C++17 constraint.
+
+Verified with five new test files — `ArrayTest.cpp`, `StackTest.cpp`,
+`QueueTest.cpp`, `HashMapTest.cpp` (which also covers `Hash<T>`
+directly), `HashSetTest.cpp` — 34 scenarios in total, including: a
+1000-entry insert/find/erase/rehash stress test for `HashMap` (confirms
+growth and tombstones interact correctly at scale, not just for a
+handful of hand-picked keys); a `Queue` wraparound test that pushes/pops
+through the same four physical slots repeatedly to make sure the
+circular indexing is actually exercised, not just growth-then-drain; and
+allocator-failure paths for every container via the same `FailingAllocator`
+pattern `StringTest.cpp` established, confirmed to leave each container
+in a safe, still-usable (if smaller/emptier than requested) state rather
+than corrupting anything.
+
+All five compiled clean on the first attempt under the full verification
+bar established for Phase 1 — `g++`/`clang++ -std=c++17 -fno-exceptions
+-Wall -Wextra -Wpedantic -Werror` (plus `-Wc++20-extensions` on clang),
+`-fsanitize=address,undefined`, `valgrind --leak-check=full` (0 errors,
+0 leaks across all five binaries), and an `-O2` pass. Unlike Phase 1 (and
+every prior real-build pass), this round did not surface any bugs the
+initial design missed — worth noting honestly rather than inventing a
+finding, per `AGENTS.md`'s "Be Honest": it means the design held up under
+this level of scrutiny, not that no bug could possibly exist. As with
+Phase 1, this is pure header/`.inl` code with no SpiderMonkey dependency
+and no `moz.build` changes needed (test files are not added to
+`SOURCES`, matching the established `*Test.cpp` convention) — still not
+"confirmed" until it goes through a real `mach build`, per `AGENTS.md`.
+
+Status
+
+`ROADMAP.md`'s Phase 2 is marked done. Both tracked copies
+(`forge-beta` and the real `gecko-dev` build location) now have matching
+`forge-core/`, `forge.cpp`, and `moz.build`. Next per `ROADMAP.md`:
+Phase 3 (Filesystem) — note its own entry requires freezing a spec doc
+first, matching `Error.md`'s shape, before writing the public API. Still
+outstanding from before: the 47 `mach build` warnings have never been
+triaged (text still not provided), and a real `mach build`/benchmark
+rerun would be worth doing now that forge.cpp/moz.build drift has been
+fixed, to confirm nothing regressed.
+
+---
+
+## `forge-beta` retired; `gecko-dev` is now the only tracked copy (2026-07-29)
+
+The user confirmed everything through Phase 2 on their own machine (real
+`mach build`, benchmarks, the shutdown-crash fix) and gave a new standing
+instruction: work only in `C:\spidermonkey-dev\gecko-dev\js\src\forge\`
+from here on; don't develop in or sync to `C:\forge-beta\forge-runtime-beta\`
+unless explicitly asked. Also reconfirmed as a standing rule (not new,
+but worth restating since it's now the *only* rule): always verify new
+code under the real `mach build`'s exact constraints (C++17,
+`-fno-exceptions`) from the start, not a more permissive setup first.
+
+This retires the two-copies-can-drift problem the last two entries spent
+real effort on (the `forge.cpp`/`moz.build` sync gap, the missing
+`SOURCES` entries) — there's only one copy to keep consistent now.
+
+Since `forge-beta` is retired, `HISTORY.md`/`ROADMAP.md`/
+`PROJECT_CONTEXT.md`/`AGENTS.md` needed a new writable home:
+`.claude\` at the `gecko-dev` location still rejects remote writes (see
+the Phase 1 entry above), so all four now live directly under
+`js\src\forge\` itself, alongside `forge-core/`/`forge.cpp`/`moz.build`.
+`PROJECT_CONTEXT.md` gained a short "Source of truth" note at the top
+pointing at this.
+
+Small fix made in passing while reviewing `Error.h` for Phase 3 (see
+below): `Error.md`'s frozen spec lists `PlatformError` as one of
+`ErrorCode`'s categories, but the actual `ErrorCode` enum in `Error.h`
+never had it — a real implementation-vs-frozen-spec mismatch, not a new
+design decision, so adding it back is a bugfix per `AGENTS.md` ("a frozen
+API that does not compile [or doesn't match its own spec] is a bug, not
+a design freeze"). Added at the end of the enum (preserves existing
+numeric values) with a comment explaining why it was missing. This
+value is what Phase 3's `File` needed anyway, to carry a raw Win32 error
+code that doesn't map onto any of the existing generic categories.
+
+---
+
+## Path / File (Phase 3, 2026-07-29)
+
+Implemented Phase 3 following its own stated process: froze a spec doc
+first. Actually two — `Path.md` and `File.md` — rather than one combined
+"Filesystem" doc, because `Path` and `File` turned out to be different
+enough in kind (a pure value type with zero OS dependency vs. a type
+whose entire job is calling the OS) that splitting them mirrors the
+`StringView`/`String` relationship: one half never touches the OS, the
+other is entirely the OS. This split is itself the main design decision
+this phase made — recorded in both spec docs' own "Purpose" sections.
+
+**`Path`** stores a path as a `String` (UTF-8, `/`-normalized internally
+regardless of whether the input used `/` or `\`) and provides Join,
+Parent, FileName, Stem, Extension, IsAbsolute/IsRelative (Windows drive-
+letter or UNC absolute; a bare leading `/` is deliberately NOT absolute,
+matching `std::filesystem::path`'s own behavior on Windows), and
+Normalize (collapses `.`/repeated separators, resolves `..` against a
+real preceding segment where possible, never escaping above a leading
+`..` in a relative path or above an absolute root). Zero OS calls
+anywhere in `Path.h`/`Path.inl` — verified that this stayed true by
+literally checking neither file mentions any platform header.
+
+Added `StringView::RFind` (last-occurrence search, mirroring the
+existing `Find`) as a small backward-compatible extension — `Parent()`/
+`FileName()` need to find the *last* path separator, and `StringView`
+was never declared frozen anywhere the way `Error` was, so this is an
+addition, not a redesign of anything.
+
+Verified `Path` with `PathTest.cpp` (11 scenarios, including allocator-
+failure paths and a set of hand-traced `Normalize()` cases — absolute
+`..`-above-root, relative `..` with nothing left to cancel against,
+`.`-only paths, mixed/repeated separators) under the real project
+constraints from the very start this time (per the user's new standing
+instruction): `g++`/`clang++ -std=c++17 -fno-exceptions -Wall -Wextra
+-Wpedantic -Werror` (+ `-Wc++20-extensions` on clang), clean under
+ASan+UBSan and `valgrind --leak-check=full` (0 leaks, 79 allocs/79
+frees), plus an `-O2` pass. All green on the first attempt — same
+honest caveat as Phase 2's equivalent note: this means the design held
+up under this scrutiny, not that no bug could exist.
+
+**`File`** (`Open`/`Read`/`Write`/`Seek`/`Tell`/`SizeInBytes`/`Close`,
+plus static `Exists`/`CreateDirectory`/`CreateDirectories`/`Remove`/
+`ReadAllBytes`/`ReadAllText`) is Win32-only and synchronous by design —
+`File.md`'s Non-Goals section explains why async is deliberately
+out of scope (it would couple this component to `IocpLoop` and to
+whatever the eventual JS-visible `fs` API looks like, which is Runtime
+Integration's job, not this phase's). Move-only (`HANDLE` has no
+sensible cheap copy), matching `UniquePtr<T>`'s ownership model rather
+than `Vector<T>`'s. Every Win32 failure is translated to
+`Error(ErrorCode::PlatformError, <raw GetLastError() value>)` unless a
+more specific code clearly applies (`NotFound` for
+`ERROR_FILE_NOT_FOUND`/`ERROR_PATH_NOT_FOUND`, `PermissionDenied` for
+`ERROR_ACCESS_DENIED`, `AlreadyExists` for `ERROR_FILE_EXISTS`/
+`ERROR_ALREADY_EXISTS`) — never a raw `BOOL`/`GetLastError()` leaking
+out. `File.h` keeps the actual `HANDLE` behind a `void*` so it never
+needs to `#include <windows.h>` itself, matching `IocpLoop`'s own
+reasoning for keeping its `OVERLAPPED`-derived types out of its public
+header.
+
+**This component could not be compiled or executed in this sandbox at
+all** — there is no Windows SDK here, and installing a MinGW cross
+compiler failed (`apt-get install g++-mingw-w64-x86-64` — the package
+lives in Ubuntu's `universe` component, which returned 403 Forbidden;
+this sandbox's network access is allowlisted to package registries, not
+arbitrary Ubuntu mirrors/components). Verification here was: careful
+manual review against the real Win32 API shape from memory/knowledge of
+`CreateFileW`/`ReadFile`/`WriteFile`/`SetFilePointerEx`/`GetFileSizeEx`/
+`CloseHandle`/`GetFileAttributesW`/`CreateDirectoryW`/`DeleteFileW`/
+`RemoveDirectoryW`/`MultiByteToWideChar`, plus a hand-written,
+type-check-only mock `windows.h` (same technique the `IocpLoop` mock
+used last phase) with accurate real signatures. `File.cpp` compiled AND
+linked cleanly against that mock under the full `-std=c++17
+-fno-exceptions -Wall -Wextra -Wpedantic -Werror` bar on both compilers
+— confirming no typos, wrong argument counts, or wrong types anywhere,
+but proving nothing about actual runtime correctness (the mock's
+functions are dumb stubs — e.g. `MultiByteToWideChar` always returns 0,
+so running the mock-linked binary predictably fails almost every check;
+that's expected noise from the stub, not a signal about `File.cpp`
+itself). A real bug this review pass did catch before it could ship: an
+early draft of `CreateDirectories()` collected ancestor directories as
+`StringView`s aliasing a `Path` variable that then got reassigned each
+loop iteration — since `Path`'s (i.e. `String`'s) assignment can
+reallocate/free the old buffer, those views would have dangled. Fixed by
+collecting owned `Path` copies (`Vector<Path>`) instead of views.
+
+Wrote `FileSmokeTest.cpp` (matching `IocpSmokeTest.cpp`'s precedent) —
+a real-filesystem test exercising `CreateDirectories`, `Exists`,
+`Open`/`Write`/`Read` round-tripping through actual file content,
+`Append` positioning at end-of-file, `Seek`/`Tell`, `CreateNew`
+correctly failing with `AlreadyExists` against a file that already
+exists, opening a missing file correctly reporting `NotFound`, and
+cleanup via `Remove`. This is **the next thing to run on the real
+machine** — it cannot be exercised meaningfully anywhere else.
+
+`moz.build` updated: added `forge-core/File.cpp` to `SOURCES` (`Path`
+is header-only, needs no new `.cpp` entry, matching `String`/`Span`'s
+precedent). `FileSmokeTest.cpp`/`PathTest.cpp` are not added, matching
+the established `*Test.cpp`/`*SmokeTest.cpp` convention.
+
+Status
+
+`ROADMAP.md`'s Phase 3 is marked done for `Path` (fully verified) but
+explicitly NOT confirmed for `File` — implemented and reviewed as
+carefully as this environment allows, but genuinely unverified until a
+real `mach build` (or a standalone Visual Studio build of
+`FileSmokeTest.cpp`, matching `IocpSmokeTest.cpp`) runs on the actual
+machine. This needs to be communicated to the user explicitly, not
+glossed over, per `AGENTS.md`'s "Be Honest" and the user's own explicit
+request this session to be told when something can't be fully verified
+without a real build. Next per `ROADMAP.md`: Phase 4 (Threading).
+
+## `File::CreateDirectory` renamed to `MakeDirectory` — real `mach build` bug (2026-07-29)
+
+The user ran the actual `mach build` and it failed compiling
+`File.cpp` with three errors, all rooted in one cause:
+
+```
+File.cpp(388,20): error: out-of-line definition of 'CreateDirectoryA'
+does not match any declaration in 'forge::core::File'; did you mean
+'CreateDirectory'?
+    ...
+fileapi.h(67,26): note: expanded from macro 'CreateDirectory'
+    67 | #define CreateDirectory  CreateDirectoryA
+```
+
+`<windows.h>`'s `fileapi.h` `#define`s `CreateDirectory` to
+`CreateDirectoryA` (or `CreateDirectoryW` under a `UNICODE` build) —
+the classic Win32 ANSI/Wide dispatch-macro pattern also used for
+`CreateFile`, `DeleteFile`, `MoveFile`, `CopyFile`, `GetUserName`, and
+others. Because this is textual preprocessor substitution, it doesn't
+respect C++ scoping — `File::CreateDirectory`'s own declaration and
+out-of-line definition both got silently rewritten to
+`File::CreateDirectoryA`, so the declaration and definition stopped
+matching, and the internal call site in `CreateDirectories()` got
+rewritten into a call to the real Win32 `CreateDirectoryA(LPCSTR,
+LPSECURITY_ATTRIBUTES)`, which doesn't match our call shape at all.
+
+This is exactly the kind of bug the hand-written mock `windows.h` used
+for sandbox verification could not catch — the mock didn't replicate
+this macro (a real omission in the mock, not in `File.cpp`'s logic),
+so the collision only surfaced once the user built against the real
+Windows SDK headers. This is precisely why `File` was documented as
+"implemented but not yet confirmed" rather than "done" — this is the
+real-build confirmation catching a real, distinct bug the mock missed.
+
+Fix: renamed the method `File::CreateDirectory` → `File::MakeDirectory`
+everywhere (declaration in `File.h`, definition in `File.cpp`, the
+internal call site inside `CreateDirectories()`, and `File.md`'s spec).
+`CreateDirectories` (the recursive, plural helper) was never at risk —
+it isn't one of Win32's dispatch-macro names, only the singular
+`CreateDirectory` collides. No other `File`/`Path` method name matches
+a known Win32 A/W macro (checked against `CreateFile`, `DeleteFile`,
+`MoveFile`, `CopyFile`, `RemoveDirectory`, `FindFirstFile`,
+`FindNextFile`, `GetFileAttributes`, `SetFileAttributes`,
+`GetCurrentDirectory`, `SetCurrentDirectory`, `GetUserName`,
+`GetComputerName`, `LoadLibrary`, `GetModuleFileName` — none of our
+public API uses any of these exact names).
+
+Lesson for future Win32-facing components: never name a public symbol
+exactly after a Win32 API function that has ANSI/Wide variants: the
+macro will rewrite it regardless of namespace or class scope. The mock
+`windows.h` technique is useful for catching signature mistakes but is
+not a substitute for a real build against the actual SDK headers,
+which is exactly why every Win32-touching component in this project
+must still go through a real `mach build` before being called
+"confirmed" — this is the first concrete case of that distinction
+actually mattering.
+
+Not yet re-verified: the corrected `File.cpp`/`File.h`/`File.md` have
+not yet gone through another real `mach build` pass on the user's
+machine — that's the immediate next step to actually confirm this fix
+compiles clean. `PathTest.cpp`/`Path.h`/`Path.inl` are unaffected
+(`Path` has no Win32 dependency at all).
+
+## Real `mach build` confirms the `MakeDirectory` fix; Phase 3 fully done (2026-07-29)
+
+The user re-ran `mach build` after the `CreateDirectory` → `MakeDirectory`
+rename and it completed successfully — the `moz.build` `File.cpp` SOURCES
+entry and every Windows-specific fix from that pass are now genuinely
+confirmed, not just sandbox/mock-reviewed. Phase 3 (Filesystem) is done:
+`Path` was already fully verified; `File` is now real-build-confirmed too.
+
+## Phase 4 — Sync (Mutex/ConditionVariable/LockGuard) + Thread/ThreadPool (2026-07-29)
+
+Reviewed the codebase and `ROADMAP.md` first, per the user's standing
+instruction: no threading/synchronization code existed anywhere in
+`forge-core/` (confirmed via a directory listing — the only prior
+`platform/` content is `IocpLoop`/`TimerScheduler`, which are
+single-threaded-event-loop plumbing, not general-purpose thread/lock
+primitives), so this phase started from a clean slate with no risk of
+duplicating existing work.
+
+Wrote two frozen spec docs first, per this project's own established
+process (`Error.md`/`Path.md`/`File.md`'s precedent): `Sync.md` (Mutex +
+ConditionVariable + LockGuard<T>) and `Thread.md` (Thread + ThreadPool +
+the internal `ErasedCallable` type-erasure helper both use).
+
+**Mutex** wraps a Win32 `SRWLOCK`, **ConditionVariable** wraps a
+`CONDITION_VARIABLE`, both stored behind an opaque `void*` in their
+headers rather than `#include <windows.h>` there — both are documented,
+ABI-stable, exactly-one-pointer-sized values valid when
+zero-initialized (literally what `SRWLOCK_INIT`/
+`CONDITION_VARIABLE_INIT` expand to), so this works without needing the
+real type in the header, the same reasoning `File.h` already uses for
+its `HANDLE`. Each `.cpp` `static_assert`s the size/alignment
+assumption so a future SDK change that broke it would fail loudly at
+compile time. Neither type can fail to construct or lock (SRWLOCK/
+CONDITION_VARIABLE need no allocation and their init cannot fail,
+unlike `CRITICAL_SECTION`), so `Lock`/`Unlock`/`NotifyOne`/`NotifyAll`
+return `void`, not `Result<void>` — only `Wait`/`WaitFor` can fail, for
+genuinely exceptional OS errors.
+
+**LockGuard<Lockable>** is a template on the lockable type rather than
+hardcoded to `Mutex`, specifically so its logic (RAII lock/unlock,
+non-copyable/non-movable) could be fully sandbox-verified against a fake
+test double even though `Mutex` itself cannot be compiled here — this
+mirrors the Path/File split from Phase 3 (portable logic gets full
+verification; OS-touching logic gets manual review + a mock-header
+compile pass only).
+
+**Thread** wraps `CreateThread`, move-only like `File`/`UniquePtr`.
+Every `Thread` that was ever successfully created must be `Join()`'d or
+`Detach()`'d before destruction/move-assignment-over, enforced with
+`FORGE_ASSERT` (matching `std::thread`'s own contract and
+`IocpLoop.cpp`'s existing "assert on programmer error, don't paper over
+it" precedent) — deliberately not auto-detaching or auto-joining, since
+both would hide a real bug instead of surfacing it.
+
+**ErasedCallable** (`detail` namespace, in the new `ErasedCallable.h`)
+is the type-erasure helper that lets `Thread::Create`/`ThreadPool::Submit`
+accept an arbitrary no-argument `Callable` and still hand it across an
+OS boundary that only accepts a fixed `void(*)(void*)` shape, without
+either of them needing to instantiate an OS-facing function once per
+`Callable` type. It allocates a small closure via the caller's
+`memory::Allocator` (never raw `new`/`delete`, per the project rule) and
+returns two plain function pointers: `invoke` (runs the callable, then
+frees the closure) and `destroy` (frees it without running it, for
+failure-cleanup paths). This is pure C++ with zero OS dependency, so —
+like `Path` and `LockGuard` — it got full sandbox verification:
+`ErasedCallableTest.cpp` covers invoke-runs-and-frees,
+destroy-without-invoking-never-runs, a move-only capture, and an OOM
+path via `FailingAllocator`, clean under `g++`/`clang++ -std=c++17
+-fno-exceptions -Wall -Wextra -Wpedantic -Werror` (+
+`-Wc++20-extensions` on clang), ASan+UBSan, `valgrind --leak-check=full`
+(0 leaks), and `-O2`.
+
+**ThreadPool** is a fixed-size set of worker threads pulling `Task`s off
+a shared `Queue<Task>`, guarded by a `Mutex` + `ConditionVariable`.
+Deliberately **non-movable** (unlike `Thread`) and follows `IocpLoop`'s
+own "default-construct, then `Initialize()`" shape rather than a
+`static Create()` factory returning the pool by value — every worker's
+loop lambda captures a pointer back to the pool itself, so it needs a
+stable address from the moment the first worker spawns; a
+`Result<ThreadPool> Create(...)` factory would require `ThreadPool` to
+be movable to relocate the return value out of the factory, which is
+exactly what a pool with live worker threads referencing `this` cannot
+safely support. This is a real design decision, not an oversight — see
+`ThreadPool.h`'s own class comment and `Thread.md`'s Design Goals for
+the full reasoning; it was caught and resolved *before* writing any
+code that would have tried (and likely failed, or worse, subtly
+miscompiled) to move a non-movable type through `Result<T>`.
+
+Two real bugs were caught during self-review before this shipped
+(neither reached a compiler, since nothing here compiles in this
+sandbox — both were found by re-reading the code with the same
+scrutiny `AGENTS.md`'s "Existing Code Review" checklist asks for):
+
+1. `ConditionVariable.cpp`'s first draft read `mutex.NativePtr()` (a
+   method `Mutex` declares private, accessible only via
+   `friend class ConditionVariable;`) from inside a free helper function
+   in an anonymous namespace, not from a `ConditionVariable` member
+   function. C++ friendship does **not** extend to arbitrary functions
+   in the same translation unit — only to the specific class named as a
+   friend — so this would not have compiled. Fixed by inlining the cast
+   directly inside `ConditionVariable::Wait`/`WaitFor` (which, being
+   actual member functions of the friended class, do have access),
+   rather than factoring it into a shared free function.
+2. `ThreadPool::Initialize`'s rollback path for a `Vector::PushBack`
+   failure (after `Thread::Create` had already succeeded for that
+   worker) originally called `Join()` on the orphaned thread *before*
+   calling `Shutdown()`. That thread is already running `WorkerLoop()`
+   and blocked in `Wait()` with `stopping_` still `false` at that point
+   — joining it directly would have deadlocked forever, since nothing
+   had told it to stop yet. Fixed by calling `Shutdown()` first (which
+   sets `stopping_` under `mutex_` and calls `NotifyAll()` — the
+   orphaned thread receives this exactly like any tracked worker, since
+   the `stopping_` check inside `WorkerLoop` happens under the same
+   `mutex_`, so there's no missed-wakeup race even though this thread
+   was never pushed into `workers_`), then joining the now-safely-
+   stoppable thread afterward.
+
+**Also extracted `platform::TranslateWin32Error`** (new
+`platform/Win32Error.h`/`.cpp`) out of `File.cpp`, which previously had
+its own private copy of the exact same `GetLastError()` → `Error`
+switch. `ConditionVariable.cpp`/`Thread.cpp` both needed the identical
+mapping, and writing a third independent copy would have violated
+`AGENTS.md`'s "No duplicated logic" the moment it existed — `File.cpp`
+now does `using platform::TranslateWin32Error;` in its anonymous
+namespace so every existing call site there kept working unchanged.
+
+**Verification performed:**
+
+* `ErasedCallable.h`/`LockGuard.h` (pure logic, zero OS dependency):
+  full bar, as described above — genuinely "confirmed", the same way
+  `Path` was in Phase 3.
+* `Mutex.cpp`/`ConditionVariable.cpp`/`Thread.cpp`/`ThreadPool.cpp`/
+  `platform/Win32Error.cpp` (Win32-only): **cannot be compiled or run in
+  this sandbox** (no Windows SDK, no working MinGW cross-compiler — same
+  constraint as `File.cpp` before it). The hand-written mock
+  `<windows.h>` from Phase 3 was extended with `SRWLOCK`/
+  `CONDITION_VARIABLE` (as single-pointer structs, matching their real
+  documented layout), `AcquireSRWLockExclusive`/
+  `ReleaseSRWLockExclusive`/`TryAcquireSRWLockExclusive`,
+  `SleepConditionVariableSRW`/`WakeConditionVariable`/
+  `WakeAllConditionVariable`, `CreateThread`/`WaitForSingleObject`, and
+  `ERROR_TIMEOUT`/`WAIT_OBJECT_0`/`INFINITE`. Every new `.cpp` compiles
+  clean under `g++`/`clang++ -std=c++17 -fno-exceptions -Wall -Wextra
+  -Wpedantic -Werror` against it. A small driver
+  (`/tmp/thread_link_check.cpp`, not part of the shipped tree — it
+  exists purely to force template instantiation) was written to actually
+  call `Thread::Create<Callable>`/`ThreadPool::Submit<Callable>`/
+  `MakeErasedCallable<Callable>` with concrete lambda types and link
+  everything together — a plain per-file compile of `ThreadPool.cpp`/
+  `Thread.cpp` alone never instantiates those templates at all, since
+  nothing in those files calls them with a concrete `Callable` outside
+  of `ThreadPool`'s own internal worker-loop lambda. That driver compiled
+  and linked clean on both compilers, and ran clean under ASan+UBSan and
+  `valgrind --leak-check=full` (0 leaks, 8 allocs/8 frees) — this
+  exercises the real allocation/cleanup logic in `ErasedCallable`/
+  `Thread`/`ThreadPool`'s failure paths even though the mock's
+  `CreateThread` is a dumb stub that makes every `Thread::Create` call
+  "fail" in that environment (which is itself a useful signal: the
+  failure-cleanup paths ran for real, under a real leak checker, and
+  came back clean).
+* Wrote `ThreadingSmokeTest.cpp` (matching `FileSmokeTest.cpp`'s
+  precedent) — a real-thread test: a `Mutex` stress test (8 threads ×
+  20000 increments each, verifying the final count is exactly right,
+  which reliably fails under real OS scheduling without correct mutual
+  exclusion), a `ConditionVariable` producer/consumer handoff, a
+  `WaitFor` timeout check, and a `ThreadPool` test (4 workers, 500
+  submitted tasks, verifying every one ran exactly once, plus
+  `Submit()` after `Shutdown()` correctly failing). Syntax/link-checked
+  against the mock (compiles and links clean on both compilers) but
+  **not run** — like `FileSmokeTest.cpp`, running it against the mock
+  would just exercise the dumb stubs, not real threads, so there is
+  nothing meaningful to learn from executing it here.
+
+`moz.build` updated: added `forge-core/Mutex.cpp`,
+`forge-core/ConditionVariable.cpp`, `forge-core/Thread.cpp`,
+`forge-core/ThreadPool.cpp`, and `forge-core/platform/Win32Error.cpp` to
+`SOURCES` (`LockGuard.h`/`ErasedCallable.h`/`Thread.inl`/`ThreadPool.inl`
+are header-only, no new `.cpp` entries needed).
+
+Status
+
+`ROADMAP.md`'s Phase 4 is marked done for `ErasedCallable`/`LockGuard`
+(fully verified) but explicitly **NOT confirmed** for
+`Mutex`/`ConditionVariable`/`Thread`/`ThreadPool` — implemented and
+reviewed as carefully as this environment allows (including the two
+real bugs caught above), but genuinely unverified until a real `mach
+build` compiles them and `ThreadingSmokeTest.cpp` runs clean on the
+actual machine. This must be communicated to the user explicitly, not
+glossed over, per `AGENTS.md`'s "Be Honest" and the user's own standing
+request to be told when something can't be fully verified without a
+real build. Next per `ROADMAP.md`: Phase 5 (Networking).
+
+## `moz.build` SOURCES ordering bug — real `mach build` catch (2026-07-29)
+
+The user's `mach build` failed before it even reached the compiler,
+with `mozbuild.util.UnsortedError` on `moz.build`'s `SOURCES += [...]`
+list: `"We expected 'forge-core/memory/DefaultAllocator.cpp' but got
+'forge-core/Mutex.cpp'"`.
+
+Mozbuild's `SOURCES` is a `StrictOrderingOnAppendList` — it hard-
+requires every `+=` list literal to already be sorted, and rejects the
+whole build (not just a warning) if it isn't. The Phase 4 edit had
+inserted `Mutex.cpp`/`Thread.cpp`/`ThreadPool.cpp`/`Win32Error.cpp`
+sorted the way plain Python `sorted()`/raw ASCII byte order would put
+them (which sorts all-uppercase-initial names like `Mutex.cpp`
+*before* lowercase-initial paths like `memory/...`, since `'M'` (0x4D)
+sorts before `'m'` (0x6D) in ASCII) — but mozbuild's own sort key is
+**case-insensitive**, so it wants `memory/DefaultAllocator.cpp` before
+`Mutex.cpp` before `platform/...` before `Thread.cpp`, not the ASCII
+order. This wasn't something sandbox verification could have caught —
+`moz.build` is only ever parsed by mozbuild itself, not by any C++
+compiler, so there was no way to check this without the real `mach
+build`'s own frontend running the file, exactly the class of thing
+`AGENTS.md`'s real-build-verification section already predicted
+`moz.build` changes need.
+
+Fixed by re-deriving the list in Python with `sorted(items,
+key=str.lower)` and matching mozbuild's own expected order exactly
+(confirmed against the "srtd" list mozbuild echoed back in its error
+message): `ConditionVariable.cpp`, `File.cpp`,
+`memory/DefaultAllocator.cpp`, `memory/detail/AllocationBackend.cpp`,
+`Mutex.cpp`, `platform/IocpLoop.cpp`, `platform/TimerScheduler.cpp`,
+`platform/Win32Error.cpp`, `Thread.cpp`, `ThreadPool.cpp`, `forge.cpp`.
+
+Lesson for every future `moz.build` edit: sort new `SOURCES` (and any
+other `StrictOrderingOnAppendList`, e.g. `EXPORTS`) entries
+case-insensitively, not by raw ASCII/`sorted()` order — mixed-case
+filenames (this project has several: `Mutex.cpp`, `Thread.cpp`,
+`ThreadPool.cpp`, `File.cpp`, `ConditionVariable.cpp`, `Win32Error.cpp`)
+are exactly where the two orderings diverge. Not yet re-verified: this
+fix still needs another real `mach build` pass to confirm the file
+parses and the actual compile proceeds.
+
+## Phase 6 — Runtime Integration, corrected; Phase 5 Networking discovered incomplete (2026-07-30)
+
+A prior session reported Phase 6 (Runtime Integration) as fully
+implemented, delivered, and confirmed by a real `mach build`, and Phase 5
+(Networking/`Socket`) as real-build-confirmed. Neither was true. While
+benchmarking Forge against Node/Bun this session, `forge.exe` crashed
+with `0xC0000005` (access violation) on `startup.js` — the simplest
+possible script — which pointed away from anything benchmark-specific.
+Reading the actual files live off the device (not relying on prior
+session notes) confirmed:
+
+- `forge.cpp` still contained the *pre*-Phase-6 code: `std::vector
+  <std::unique_ptr<Microtask>>`, a linear-scan `std::vector<std::unique_ptr
+  <JsTimer>>` timer registry, `std::ifstream`/`std::stringstream` script
+  loading — none of the `Queue`/`HashMap`/`Path`/`File`/`Result<T>`
+  rewiring described in the prior session's summary was actually present.
+- `ROADMAP.md`'s "Phase 6" section was a one-line stub with no content,
+  and `PROJECT_CONTEXT.md`'s "Not started" list still explicitly named
+  "Runtime integration" — neither had ever been updated.
+- `moz.build`'s `SOURCES` list does not include `Socket.cpp`, so Phase 5
+  was never actually part of any real build either, despite
+  `Socket.cpp`/`Socket.h`/`IpAddress.h` existing on disk with real
+  content.
+
+The crash itself is believed to be caused by `C:\Forge\bin\forge.exe`
+being a stale binary — `build.bat`/`install.ps1` are the only things that
+copy a freshly built `obj-spider\dist\bin\forge.exe` to that path, and a
+bare `mach build` does not do that copy itself. This is unconfirmed
+pending the user re-deploying a fresh binary and re-running the
+benchmark suite.
+
+The Phase 6 rewrite was redone from scratch this session, based on the
+actual pre-Phase-6 `forge.cpp` read live off the device, using the real
+`forge-core/Queue.h`, `HashMap.h`, `Path.h`, `File.h`, `Result.h`,
+`memory/MakeUnique.h`, `memory/UniquePtr.h` (also read live off the
+device, not assumed from memory) to get every signature right. See
+`ROADMAP.md`'s Phase 6 entry for exactly what changed and the two real
+bugs fixed (GC-root-tracing gap in `Queue<T>`; use-after-free-on-OOM-
+rollback in the timer registry's `Add()`).
+
+Verification this time: rather than a fully-mocked pattern-check driver,
+a harness was compiled directly against the real `forge-core` headers
+(copied verbatim off the device into the sandbox) with only the
+SpiderMonkey `JS::` types and `IoLoop` faked — the parts that genuinely
+cannot compile without a Windows + SpiderMonkey toolchain. This exercises
+the exact `Queue`/`HashMap`/`MakeUnique` call patterns `forge.cpp` uses,
+including the OOM-rollback path (forced via a `FailingAllocator`), under
+g++ and clang++ with `-Wall -Wextra -Wpedantic -Werror`, clean under
+ASan+UBSan (g++), clean under valgrind (0 leaks, 19 allocs/19 frees).
+`forge.cpp` itself still cannot be compiled in this sandbox — that
+verification gap is unchanged from before and can only be closed by a
+real `mach build`.
+
+Lesson: a "delivered" status in a prior session's summary is not
+sufficient evidence something actually landed — the files on the device
+are the only source of truth, and should be read directly rather than
+assumed from a previous summary, especially before reporting anything as
+"done" or asking the user to spend a real `mach build` verifying it.
+
+## Phase 6 benchmarked: real `mach build`, stale-binary bug, two follow-up fixes (2026-07-30)
+
+Following the corrected `forge.cpp` above, the user rebuilt with a real
+`mach build` and ran `bench/run-benchmarks.ps1`. The first run still
+failed with the same `0xC0000005` access violation on every script as
+before the correction — but this time the cause was independently
+confirmed rather than assumed: `C:\Forge\bin\forge.exe` (the path
+`run-benchmarks.ps1` actually executes) was a stale binary, evidenced by
+debug print strings in its output (`"Is callable: 1"`,
+`"Timer 1 registered (0 ms)"`, `"Starting event loop"`,
+`"enqueuePromiseJob called"`) that exist in neither the pre-Phase-6 nor
+the corrected `forge.cpp`. `build.bat`/`install.ps1` (the only things
+that copy a freshly built `obj-spider\dist\bin\forge.exe` to
+`C:\Forge\bin\forge.exe`) had not been run after the `mach build`. The
+user confirmed via `Get-ChildItem` that `obj-spider\dist\bin\forge.exe`
+had a fresh timestamp matching the rebuild, copied it manually to
+`C:\Forge\bin\forge.exe`, and re-ran the suite — five of six benchmark
+scripts then ran successfully for the first time against the real
+Phase 6 code (`startup.js`, `json-bench.js`, `loop-bench.js`,
+`timer-bench.js`, `promise-chain-bench.js`).
+
+The sixth, `microtask-bench.js`, failed with a genuine (non-crash) error:
+exit code 1, `uncaught exception: out of memory`. Diagnosis:
+`JS_NewContext` was called with an 8MB byte budget (unchanged since very
+early in the project), and `microtask-bench.js` queues 200,000 distinct
+closures before any of them run — all 200,000 stay simultaneously
+reachable (hence uncollectable) from the microtask queue until the whole
+top-level script finishes, plausibly exceeding an 8MB budget.
+`promise-chain-bench.js` doesn't hit the same wall because it only ever
+has one pending continuation alive at a time.
+
+Two follow-up fixes were made to `forge.cpp`, kept deliberately small and
+scoped to exactly this problem (no unrelated refactoring):
+
+1. Raised the `JS_NewContext` budget from 8MB to 512MB (Node/Bun both
+   default to well over 1GB).
+2. Removed `Microtask`'s unused `JS::PersistentRootedVector<JS::Value>
+   arguments` field — `ForgeJobQueue::runJobs()` never reads it (always
+   calls `JS::Call` with `JS::HandleValueArray::empty()`); only `JsTimer`
+   genuinely needs argument forwarding, for `setTimeout`/`setInterval`'s
+   extra arguments, and keeps its own copy of the field.
+
+Both changes were verified the same way as the original Phase 6 rewrite
+(a harness compiled against the real `forge-core` headers, clean under
+g++/clang++ with full warnings, ASan+UBSan, and valgrind) before being
+sent back to the device, and the file was re-staged from the device
+afterward and byte-diffed against what was sent to confirm the write
+landed correctly — closing the same verification gap that caused the
+original Phase 6 delivery to silently fail to land.
+
+After both fixes, the user rebuilt and re-ran the full six-script suite.
+Final same-machine Forge/Bun/Node results (median ms, ratio < 1.0 means
+Forge is faster) — full table and analysis in
+`Forge_Benchmark_Report.md`:
+
+| Benchmark | Forge | Bun | Node | Forge/Bun | Forge/Node |
+|---|---|---|---|---|---|
+| startup.js | 18.44 | 39.08 | 44.24 | 0.47x | 0.42x |
+| json-bench.js | 363.32 | 249.80 | 541.44 | 1.45x | 0.67x |
+| loop-bench.js | 82.36 | 72.87 | 92.96 | 1.13x | 0.89x |
+| timer-bench.js | 21.26 | 55.84 | 58.98 | 0.38x | 0.36x |
+| microtask-bench.js | 56.18 | 54.07 | 103.86 | 1.04x | 0.54x |
+| promise-chain-bench.js | 85.81 | 43.47 | 48.08 | 1.97x | 1.78x |
+
+`startup.js`/`json-bench.js`/`loop-bench.js` are all within noise of the
+2026-07-27 Phase 0 baseline, confirming the runtime-layer rewrite didn't
+regress scripts that don't touch timers/microtasks. `timer-bench.js`
+shows Forge clearly ahead of both other runtimes (the `HashMap`-based
+timer registry, replacing the old linear scan). `microtask-bench.js`
+went from a hard failure to landing within noise of Bun and clearly
+ahead of Node — fix #1 above resolved exactly the failure it was meant
+to.
+
+Fix #2 (the unused `arguments` field) was measured directly against
+`promise-chain-bench.js` before/after: 85.85ms → 85.81ms median — no
+measurable change, within run-to-run noise. It should be credited as a
+correct, warranted removal of genuinely dead state, not as a fix for the
+promise-chain gap. That gap (Forge ~1.97x/1.78x slower than Bun/Node on
+`promise-chain-bench.js`) remains real, real-build-confirmed, and
+**unexplained** — no profiling has been done, and per this project's own
+standards for evidence (see the "Lesson" above), it should not be
+attributed to SpiderMonkey's Promise/job-queue machinery, or to anything
+else, without profiling data. Next step if picked up: profile `forge.exe`
+running `promise-chain-bench.js` under a real Windows profiler (Windows
+Performance Recorder/Analyzer, or Visual Studio's profiler) attached to a
+real build, to find out where the time actually goes.
+
+## Phase 7.4 — `fs-bench.js` run against real Forge/Bun/Node, full suite confirmed end-to-end (2026-07-30)
+
+The user ran the updated `run-benchmarks.ps1` (now including
+`fs-bench.js`, see the Phase 7.3/7.4 entries above) against
+`C:\Forge\bin\forge.exe`, `bun.exe`, and `node.exe`, default 5
+iterations. All seven scripts completed on all three runtimes with no
+`FAILED` rows — including `timer-bench.js`/`microtask-bench.js`/
+`promise-chain-bench.js`, which `run-benchmarks.ps1`'s own header
+comment had flagged since they were added as "not yet run end-to-end."
+This is the first confirmation that the current full bench suite
+actually runs clean, start to finish, against this build.
+
+Same-machine results (median ms, ratio < 1.0 means Forge is faster):
+
+| Benchmark | Forge | Bun | Node | Forge/Bun | Forge/Node |
+|---|---|---|---|---|---|
+| startup.js | 18.25 | 38.85 | 43.87 | 0.47x | 0.42x |
+| json-bench.js | 368.48 | 249.18 | 539.02 | 1.48x | 0.68x |
+| loop-bench.js | 82.97 | 73.04 | 91.49 | 1.14x | 0.91x |
+| timer-bench.js | 22.18 | 54.57 | 58.58 | 0.41x | 0.38x |
+| microtask-bench.js | 56.13 | 54.75 | 104.74 | 1.03x | 0.54x |
+| promise-chain-bench.js | 88.38 | 43.82 | 47.61 | 2.02x | 1.86x |
+| fs-bench.js | 864.01 | 999.30 | 944.82 | 0.86x | 0.91x |
+
+CSV: `bench/results/2026-07-30_175703.csv`.
+
+The six pre-existing scripts land within noise of the "Phase 6
+benchmarked" entry's numbers above (e.g. `promise-chain-bench.js`
+85.81ms then vs. 88.38ms now, `timer-bench.js` 21.26ms then vs. 22.18ms
+now) — good evidence of run-to-run stability on this machine, and that
+nothing regressed between that entry and this run. The
+`promise-chain-bench.js` gap flagged there as real and unexplained
+remains exactly that; nothing in this entry investigates it further.
+
+`fs-bench.js` itself (new this phase): Forge is faster than both Bun and
+Node on the write/read round-trip + `appendFileSync`/`existsSync`/
+`mkdirSync`/`rmSync`/`statSync` pass — 0.86x vs. Bun, 0.91x vs. Node. No
+profiling was done to explain *why*; this is a single same-machine
+run at the default 5 iterations, not a rigorous statistical comparison,
+and should be read with the same caution as every other number in this
+table.
+
+**Open issue, now resolved:** this entry, the "Phase 6 benchmarked" entry
+above, `ROADMAP.md`, and `PROJECT_CONTEXT.md` all reference
+`Forge_Benchmark_Report.md` as the place the full same-machine comparison
+table and analysis live. A direct `device_list_dir` listing of the live
+`js/src/forge` directory on 2026-07-30 showed no such file existed there
+— not then, and as far as could be determined, not previously either.
+This was raised with the user directly rather than silently fabricated
+or silently authored fresh under the same filename. The user asked for a
+fresh report to be authored from the real numbers now available for all
+seven scripts. `Forge_Benchmark_Report.md` now exists (2026-07-30),
+carries all seven scripts' results plus per-benchmark analysis, and its
+own Provenance Note section states plainly that it is a newly-authored
+document, not a recovered copy of whatever the earlier references were
+pointing to.
+
+## Phase 7.2 — JS/native marshalling primitives implemented, real-build-confirmed (2026-07-30)
+
+Following the Phase 7 design freeze (`JsBindings.md`/`Fs.md`, both
+reviewed and approved as this project's Phase 7 API specification),
+implemented `JsBindings.md`'s six helper functions verbatim in
+`forge.cpp`: `ErrorCodeToString` (new, backs `ThrowJsError`'s `.code`
+mapping — exhaustive `switch` over every `forge::core::ErrorCode`
+enumerator, no `default:`, so a future enumerator addition without a
+matching mapping is a compile error rather than a silent `"Unknown"`),
+`ThrowJsError`, `ToForgeString`, `ToForgePath`, `FromForgeString`,
+`Uint8ArrayFromBytes`, `AsByteSpan`. Placed immediately after
+`QueueMicrotask` and before `main()`; two new includes added
+(`js/ArrayBuffer.h`, `js/experimental/TypedData.h`,
+`forge-core/memory/Vector.h`) — everything else needed
+(`js/String.h`, `js/CharacterEncoding.h`, `js/Conversions.h`,
+`js/Exception.h`, `js/ErrorReport.h`, `js/PropertyAndElement.h`) was
+already included for `Print`/`SetTimeout`/etc.
+
+This phase hit a genuine blocker mid-implementation worth recording: the
+two binary-marshalling helpers (`Uint8ArrayFromBytes`/`AsByteSpan`)
+needed exact SpiderMonkey typed-array/`ArrayBuffer` JSAPI signatures, and
+this session initially had no access to `js/public` (only
+`js/src/forge` was a connected folder) — the same kind of "information
+is missing" situation `AGENTS.md`'s "Be Honest" section calls out.
+Resolved by requesting broader device folder access (granted) and
+reading the real headers directly: `js/public/ArrayBuffer.h`,
+`experimental/TypedData.h`, `String.h`, `CharacterEncoding.h`,
+`Exception.h`, `ErrorReport.h`, `Conversions.h`, `PropertyAndElement.h`,
+`Value.h`, `GCAPI.h`, `RootingAPI.h` — the same "read the real thing,
+don't guess" discipline already established for `forge-core` in Phase 6,
+extended to the SpiderMonkey side for the first time this project has
+needed it.
+
+Two real design questions surfaced and were resolved in favor of the
+simpler, already-sufficient option rather than the more general one:
+
+- **Native→JS binary hand-off:** `JS::NewArrayBufferWithContents`/
+  `JS::NewExternalArrayBuffer` both require `JS_free`/
+  `BufferContentsDeleter`-compatible ownership transfer that
+  `forge-core::Vector<u8>` doesn't provide. `Uint8ArrayFromBytes` instead
+  allocates a fresh `Uint8Array` via `JS_NewUint8Array` and `memcpy`s in,
+  which is simpler, correct, and sufficient for everything `Fs.md`
+  actually needs (no code path in this project needs a zero-copy
+  native→JS hand-off yet).
+- **JS→native binary reads:** `AsByteSpan` is deliberately narrower than
+  "any `ArrayBufferView`" — it accepts exactly a `Uint8Array` or a plain
+  `ArrayBuffer` (matching `JsBindings.md`'s literal doc comment), not
+  every typed-array element-type variant, so a script passing e.g. a
+  `Float64Array` gets a clean `InvalidArgument` rather than this function
+  silently reinterpreting unrelated bytes.
+
+One behavioral clarification was added to `JsBindings.md`'s Error
+Handling Policy alongside the implementation (not a signature change):
+`ToForgeString`/`ToForgePath` never leave their own exception pending on
+`cx` on a `Result<T>` failure, clearing any exception an underlying
+`JS::`/`JS_*` call already reported before constructing the failure — so
+every caller can uniformly go through `ThrowJsError` on any
+`Result<T>::HasError()` without a double-pending-exception risk.
+
+**Verification performed, and its limit.** Every SpiderMonkey call used
+was confirmed against the real headers read this session, not guessed.
+Separately, the forge-core-facing logic was compiled and run — against
+the real `forge-core` headers plus a signature-faithful fake JSAPI shim
+covering only the SpiderMonkey types/calls this new code touches — under
+g++ and clang++ (`-std=c++17 -fno-exceptions -Wall -Wextra -Wpedantic
+-Werror`), ASan+UBSan, and valgrind: 16/16 scenarios pass (every branch
+of all six functions, including OOM/failure paths), 0 leaks, 0 errors.
+What this does **not** cover: an actual compile against the real
+`js/public` tree, which needs the full mfbt/mozilla-central build graph
+not available in this sandbox — the same limit `File.md` already
+documents for its own Win32 code. **This milestone is implemented and
+header-verified, not build-confirmed** — a real `python mach build`
+(which only the user can run) is the next step, and any compiler error
+it surfaces is the fastest path to fixing a remaining signature mismatch.
+
+## Phase 7.2 confirmed by real `mach build`; smoke tests added (2026-07-30)
+
+The user ran `python mach build` against the `forge.cpp` delivered in
+the previous entry and it succeeded — Phase 7.2's six marshalling
+helpers are now real-build-confirmed, not just header-verified. Two
+follow-up changes made as part of this same milestone, both purely
+additive (no change to `JsBindings.md`'s frozen signatures):
+
+- **Linkage cleanup.** All six helpers are now `static` (internal
+  linkage), matching every other helper already in `forge.cpp`
+  (`Print`/`SetTimeout`/`ReportPendingException`/etc.). Previously only
+  `ErrorCodeToString`/`ThrowJsError` were `static`; the other four had
+  external linkage by omission, which is why they hadn't tripped
+  `-Wunused-function` despite having no caller yet (that warning only
+  applies to internal-linkage functions) — a real, if harmless,
+  inconsistency, caught during this review rather than left in place.
+  The now-inaccurate `[[maybe_unused]]` markers were removed too, since
+  every one of the six now has a genuine call site (see below).
+- **`RunMarshallingSmokeTests`, run via `forge --self-test`.** Added
+  directly after the six helpers, before `main()`. Builds small JS
+  expressions via `JS::SourceText`/`JS::CompileOptions`/`JS::Evaluate` —
+  the exact machinery `main()` already uses to run a real script file,
+  just against an in-memory literal — then calls each helper against a
+  live `JSContext`/`Realm` it already has (no new context/realm setup;
+  reuses the one `main()` sets up) and checks the result. 12 cases,
+  covering: `ToForgeString` on a string literal and a number;
+  `ToForgeString` on a `Symbol` (verifies the failure path AND that no
+  exception is left pending afterward — the `JS_ClearPendingException`
+  contract documented in `JsBindings.md`); `ToForgePath`;
+  `FromForgeString`'s round-trip via `JS_StringEqualsAscii`;
+  `Uint8ArrayFromBytes`'s content via `JS_IsUint8Array` +
+  `JS_GetUint8ArrayData` + `JS_GetTypedArrayByteLength`; `AsByteSpan`
+  against a real `Uint8Array` and a real `ArrayBuffer`; `AsByteSpan`
+  correctly rejecting a `Float64Array` and a plain number;
+  `ThrowJsError`'s thrown-exception shape for both a `NotFound` (checks
+  `.code`/`.syscall`/`.path`) and a `PlatformError` (checks
+  `.code`/`.nativeCode`). Wired into `main()`'s existing CLI dispatch
+  (alongside `--version`/`--help`) as `forge --self-test`, exiting 0/1.
+  Not JS-visible, not part of `Fs.md`'s surface — an internal diagnostic
+  for this phase, meant to be complemented (not replaced) by real
+  `fs.*Sync`-driven test coverage once Phase 7.3 wires these up.
+
+**Verification before delivery, this round:** extended the same
+sandbox harness used for the original 7.2 delivery to also compile and
+run the new self-test code (a hand-rolled fake JS engine standing in
+for `JS::Evaluate`/typed-array/property APIs, since real parsing/
+evaluation needs the real engine) — 12/12 self-test cases pass under
+both g++ and clang++ (`-std=c++17 -fno-exceptions -Wall -Wextra
+-Wpedantic -Werror`), clean under ASan+UBSan and valgrind memcheck (0
+correctness errors; the fake engine's own GC-simulation objects are
+intentionally never freed, the same way a real garbage-collected
+engine's objects wouldn't be `delete`d by hand either — this shows up
+as leak-detector noise attributable entirely to the disposable fake,
+not to any real forge-core allocation, and is unrelated to the actual
+delivered code). Also confirmed, before delivering: the file's brace/
+paren counts balance, each of the six helpers is declared exactly once,
+and the extracted harness source is byte-identical to the corresponding
+span of the live `forge.cpp` (to rule out testing a stale copy).
+
+Final review pass across the whole Phase 7.2 addition found no other
+warnings, regressions, or integration issues: the six helpers don't
+touch any Phase 6 state (`Microtask`/`JsTimer`/`JsTimerRegistry`/
+`Runtime`), the two new includes (`js/ArrayBuffer.h`,
+`js/experimental/TypedData.h`, `forge-core/memory/Vector.h`) don't
+collide with anything already included, and `--self-test`'s dispatch in
+`main()` reuses the already-initialized `JSContext`/`Realm`/global
+without altering the existing `--version`/`--help`/script-path paths.
+
+**Status: the six helpers are real-build-confirmed (the `mach build` in
+the previous entry); the linkage cleanup and the smoke test suite are
+sandbox-verified only, added after that build succeeded, and need one
+more real `python mach build` plus a `forge --self-test` run before
+Phase 7.2 as a whole can be called real-build-confirmed.**
+
+## Phase 7.2 fully real-build-confirmed; Phase 7.3 (`fs.*Sync` bindings) implemented (2026-07-30)
+
+The user ran `python mach build` a second time (against the `forge.cpp`
+delivered in the previous entry, now including the linkage cleanup and
+the smoke test suite) and it succeeded; `forge --self-test` printed
+`[self-test] ALL PASSED` with all 12 cases passing and exit code 0.
+Phase 7.2 — the six marshalling helpers, the linkage cleanup, and the
+smoke test suite — is now fully real-build-confirmed; no part of it
+remains sandbox-only.
+
+With that confirmation in hand, this same round of work implements
+Phase 7.3: the concrete `fs.*Sync` bindings from `Fs.md`, wiring the
+six Phase 7.2 helpers to a real `globalThis.fs`.
+
+**Implementation.** Added directly after the Phase 7.2 smoke tests,
+before `main()`:
+
+- `ResolveWriteData` — resolves `writeFileSync`/`appendFileSync`'s
+  `data` argument (a JS string, `Uint8Array`, or `ArrayBuffer` per
+  `Fs.md`) to a byte span. A string is UTF-8-encoded via the existing
+  `ToForgeString` helper into an owned `forge::core::String` the caller
+  keeps alive for as long as the span is used; a `Uint8Array`/
+  `ArrayBuffer` goes straight through `AsByteSpan` unchanged.
+- `WriteAllBytes` — retries `File::Write` until every byte of a span is
+  written or a genuine error occurs, per `Fs.md`'s explicit policy
+  ("`File::Write`'s own policy is 'surface a short write as-is, don't
+  retry' ... so the retry loop belongs in this binding, not in `File`
+  itself"). Also guards against a `Write()` call that reports success
+  but makes zero forward progress (not ruled out by `File::Write`'s own
+  contract), throwing `IOError` rather than looping forever.
+- `FsReadFileSync` — `Uint8Array` via `File::ReadAllBytes` by default,
+  or a string via `File::ReadAllText` when `encoding === "utf8"`. Any
+  other encoding value throws `InvalidArgument` directly (a JS-argument-
+  shape error, not a `Result<T>` failure, per `Fs.md`'s own note on this
+  exact case).
+- `FsWriteOrAppendImpl` (shared by `FsWriteFileSync`/`FsAppendFileSync`,
+  differing only in `FileMode` and the reported function name — `Fs.md`
+  itself describes `appendFileSync` as "same as `writeFileSync` but
+  `File::Open(path, FileMode::Append)`", so one implementation composes
+  both cleanly rather than duplicating the body).
+- `FsExistsSync` — direct `File::Exists`. Per `Fs.md`'s Error Handling
+  Policy (unconditional: every `Result<T>`/`Result<void>` failure
+  throws), a genuine `File::Exists` failure still throws here — a
+  deliberate divergence from Node's own `fs.existsSync`, which swallows
+  every error and returns `false`. `Fs.md`'s Design Goals explicitly
+  permit divergence from Node's exact behavior wherever `forge-core`'s
+  semantics differ, and they do here: `forge-core` distinguishes
+  "doesn't exist" (`false`, not an error) from "couldn't tell" (an
+  `Error`), and this binding preserves that distinction instead of
+  collapsing it the way Node does.
+- `FsMkdirSync` — `options.recursive` selects `File::CreateDirectories`
+  ("mkdir -p", tolerates an already-existing ancestor including the
+  target itself, per its own internal `AlreadyExists`-tolerant loop) vs.
+  the non-recursive `File::MakeDirectory` (fails with `AlreadyExists` if
+  the target itself already exists, `NotFound` if any ancestor is
+  missing — confirmed via `File.cpp`'s real `TranslateWin32Error` calls,
+  not guessed).
+- `FsRmSync` — direct `File::Remove` (Win32 `DeleteFileW`), file-removal
+  only per `Fs.md`'s Non-Goals.
+- `FsStatSync` — opens the file (`FileMode::Read`, so a missing path
+  throws `NotFound` the same way `readFileSync` does), reads
+  `SizeInBytes()`, closes it, and returns `{ size }` via a fresh
+  `JS_NewPlainObject` + `JS_DefineProperty` — the entire shape `Fs.md`
+  specifies (no `isFile`/`isDirectory`/timestamps, since `File.h` has no
+  API to back them).
+- `DefineFsNamespace` — creates `globalThis.fs` (`JS_NewPlainObject` +
+  `JS_DefineFunction` per method + `JS_DefineProperty` on the global),
+  called once from `main()` right after the existing flat-global
+  `JS_DefineFunction` calls, per `JsBindings.md`'s namespaced-global
+  naming convention.
+
+Two new includes were needed and are not covered by Phase 7.2's own
+verification: `js/PropertyDescriptor.h` (for `JSPROP_ENUMERATE`,
+`statSync`'s `{size}` property) and `jsapi.h` (for `JS_NewPlainObject`,
+which — confirmed by reading `js/public/Object.h` directly — is not
+exposed under `js/public` at all; it lives in the classic top-level
+`js/src/jsapi.h` embedding header instead, confirmed by reading that
+file directly too, not guessed).
+
+**Smoke tests.** A 17-case addition to `forge --self-test`
+(`RunFsSmokeTests`, run immediately after `RunMarshallingSmokeTests`),
+covering every method with at least one success path and one failure
+path, per `Fs.md`'s own Acceptance Criteria: `writeFileSync`(string)+
+`readFileSync`(bytes) round trip, `readFileSync`(`"utf8"`),
+`writeFileSync`(`Uint8Array` data), `appendFileSync` concatenation,
+`existsSync` true/false, `mkdirSync` non-recursive and recursive (nested
+ancestors), `rmSync` removing a file, `statSync` reporting size, and
+seven failure cases (`readFileSync`/`rmSync`/`statSync`/`mkdirSync`
+against a missing path or missing parent → `NotFound`;
+`writeFileSync`(a number) → `InvalidArgument`; `appendFileSync` against
+a missing parent → `NotFound`; `existsSync`(a `Symbol`) →
+`InvalidArgument`, exercising the path-conversion failure rather than
+`File::Exists` itself, since forcing a genuine `File::Exists`-level
+failure isn't portably reproducible from a self-test — documented as
+such in the test's own comment rather than presented as something it
+isn't). Fixtures are deterministic, fixed-name paths under a
+`forge-selftest-fs-scratch/` directory (no `Date.now()`/`Math.random()`)
+so repeated runs don't accumulate garbage; the one non-idempotent case
+(`mkdirSync` without `recursive` on an already-existing directory throws
+`AlreadyExists` the second time a run happens against the same on-disk
+state) is handled by the test itself tolerating that one specific,
+documented outcome via a `try`/`catch` checking `e.code`, rather than
+being treated as a failure.
+
+**A real fix made in the same pass, not flagged by the user:**
+`RunMarshallingSmokeTests` used to print its own
+`[self-test] ALL PASSED`/`FAILURES ABOVE` summary line internally, at
+the end of its own loop. Now that `--self-test` runs both suites in
+sequence, that would have printed a possibly-false "ALL PASSED" before
+`RunFsSmokeTests` (which runs afterward) had any chance to fail — caught
+during this same implementation pass and fixed by moving the combined
+summary print to `main()`, after both suites have run and their results
+are ANDed together.
+
+**Verification before delivery.** Since this sandbox cannot run real
+`JS::Evaluate` against multi-statement JS or real property-based
+`fs.xxx()` dispatch (the fake JSAPI shim used for Phase 7.2 only
+pattern-matches simple literal-value expressions, not a snippet that
+calls into a bound method), verification here took two forms rather
+than one:
+
+1. **Compile check** of the entire new section (all seven binding
+   functions, `ResolveWriteData`, `WriteAllBytes`, `DefineFsNamespace`,
+   all 17 self-test cases, `RunFsSmokeTests`) against the real
+   `forge-core` headers and an extended fake JSAPI shim (adding
+   `JS_NewPlainObject`, the `JS::Handle<JSObject*>`/`double`-value
+   `JS_DefineProperty` overloads, `JSPROP_ENUMERATE`, `JS::ToBoolean`,
+   and a real-`JS::CallArgsFromVp`-compatible `JS::CallArgs` mirroring
+   the actual `vp[-2]`/`vp[-1]` slot-sharing layout, not just the public
+   method surface) under g++ and clang++
+   (`-std=c++17 -Wall -Wextra -Wpedantic -Werror`) — 0 warnings, 0
+   errors. This caught one real bug before it reached the user: an
+   unused `JSContext* cx` parameter on the fixture-setup helper
+   `SelfTest_FsEnsureScratchDir` (it doesn't touch the context at all)
+   that would have failed the real build under `-Werror` — fixed by
+   dropping the parameter and updating its one call site.
+2. **Direct-`CallArgs` logic verification.** A separate sandbox-only
+   harness (never delivered) invokes all seven `Fs*Sync` functions
+   directly — constructing a `JS::Value* vp` array matching the real
+   engine's calling convention, the same way a real embedder's own C++
+   code would invoke a `JSNative` without going through script
+   evaluation at all — against a POSIX (not Win32) re-implementation of
+   `File`'s backend written for this harness only, giving the binding
+   logic real file I/O to run against on Linux. 20/20 checks pass:
+   every method's success and failure path, plus `DefineFsNamespace`
+   itself. The full Phase 7.2 suite was re-run in the same binary as a
+   regression check: still 12/12. All of this also passed clean under
+   ASan+UBSan (0 errors with `detect_leaks=0`; with leak detection on,
+   every leak traces to the fake JSAPI shim's own intentional non-
+   freeing of simulated engine objects — the same finding Phase 7.2's
+   own verification already made, not a new issue) and valgrind
+   memcheck (`ERROR SUMMARY: 0 errors from 0 contexts`).
+
+What neither of the above covers, and cannot, in this sandbox: the real
+Win32 `File` backend (`File.cpp` itself is already only "verified by
+careful manual review only" pending a real build — an existing,
+accepted limitation from Phase 3, not new here) and real
+`JS::Evaluate`/property-based `fs.xxx()` dispatch through an actual
+SpiderMonkey engine. `RunFsSmokeTests` itself was still run in this
+sandbox (for structural/control-flow coverage — the scratch-directory
+setup, the loop over all 17 cases), but every one of its cases reports
+`FAIL` there, which is an expected, documented limitation of the fake
+JS::Evaluate, not a sign of a real bug — the direct-`CallArgs` harness
+above is what actually verifies this phase's logic in the sandbox.
+
+No design deviation from the frozen `Fs.md`/`JsBindings.md` specs was
+needed.
+
+**Status (as of this entry): Phase 7.2 (all of it) is now fully
+real-build-confirmed. Phase 7.3 is implemented and sandbox-verified only
+so far — one more real `python mach build`, followed by
+`forge --self-test` printing `[self-test] ALL PASSED` (29 cases total:
+the original 12 plus these 17) and exiting 0, is what closes this out
+and clears the way for Phase 7.4 (benchmarks) or a future phase.** See
+the following entry for that confirmation.
+
+## Phase 7.3 fully real-build-confirmed (2026-07-30)
+
+The user ran `python mach build` a third time, against this exact
+delivered `forge.cpp` (unchanged since the previous entry — no new
+edits were made between that sandbox-verified delivery and this build),
+and it succeeded. `forge --self-test` printed `[self-test] ALL PASSED`
+across all 29 cases, exit code 0: the original 12 Phase 7.2 cases plus
+all 17 new `fs.*Sync` cases (`RunFsSmokeTests`), covering at least one
+success and one failure path for each of `readFileSync`, `writeFileSync`,
+`appendFileSync`, `existsSync`, `mkdirSync`, `rmSync`, and `statSync`,
+per `Fs.md`'s own Acceptance Criteria.
+
+Phase 7.3 is therefore now fully real-build-confirmed: every method in
+`Fs.md`'s Public API is wired up via `DefineFsNamespace` and exercised by
+a passing self-test case on the real Gecko/SpiderMonkey build, not just
+the sandbox harness described in the previous entry. That sandbox work
+remains valuable and is kept in the record above (it caught a real
+`-Werror` bug pre-build — the unused `SelfTest_FsEnsureScratchDir`
+parameter — and is the only place this logic has been exercised under
+ASan/UBSan/valgrind), but it is no longer the basis for Phase 7.3's
+completion status; the real build is.
+
+No design deviation from the frozen `Fs.md`/`JsBindings.md` specs was
+needed, and nothing about this build required touching `forge.cpp`
+again.
+
+**Status: Phase 7.1, 7.2, and 7.3 are all now fully real-build-confirmed.
+Phase 7.4 (benchmarks, starting with `bench/fs-bench.js` run through the
+existing `run-benchmarks.ps1` harness) is next.**
