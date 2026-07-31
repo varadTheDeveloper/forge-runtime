@@ -1,0 +1,119 @@
+# Forge
+
+Forge is an experimental JavaScript runtime built on Mozilla's SpiderMonkey engine.
+
+The project focuses on building a modern JavaScript runtime from the ground up with a native, high-performance architecture instead of layering new APIs over existing runtimes.
+
+> **Status:** Early development
+
+---
+
+## Current Progress
+
+### ✅ Completed
+
+- SpiderMonkey integration
+- Forge Core foundation
+  - Types
+  - Error
+  - Result / ResultVoid
+  - Assert
+  - Allocator
+  - UniquePtr
+  - Vector
+  - String
+  - StringView
+  - Span
+  - Array
+  - Queue
+  - Stack
+  - HashMap
+  - HashSet
+- Native Windows IOCP Event Loop
+- ThreadPool
+- Timers
+  - `setTimeout()`
+  - `setInterval()`
+  - `clearTimeout()`
+- Microtask queue
+  - `queueMicrotask()`
+- JavaScript Filesystem API
+  - `fs.readFileSync()`
+  - `fs.writeFileSync()`
+  - `fs.appendFileSync()`
+  - `fs.existsSync()`
+  - `fs.mkdirSync()`
+  - `fs.rmSync()`
+  - `fs.statSync()`
+- 29 runtime self-tests
+- Benchmark suite
+
+---
+
+## Current Platform
+
+- ✅ Windows x64
+
+Linux and macOS support are planned.
+
+---
+
+## Running
+
+Create a file:
+
+```javascript
+print("Hello Forge!");
+```
+
+Run it:
+
+```bash
+forge.exe hello.js
+```
+
+---
+
+## Benchmarks
+
+| Benchmark | Forge | Bun | Node | Winner |
+|-----------|------:|----:|-----:|:------:|
+| Startup | **19.65 ms** | 38.93 ms | 43.62 ms | 🥇 Forge |
+| JSON | 368.79 ms | **249.93 ms** | 546.43 ms | 🥇 Bun |
+| Loop | 81.98 ms | **71.56 ms** | 90.95 ms | 🥇 Bun |
+| Timers | **24.13 ms** | 49.44 ms | 59.55 ms | 🥇 Forge |
+| Microtasks | 55.93 ms | **54.71 ms** | 108.69 ms | 🥇 Bun |
+| Promise Chains | 88.84 ms | **44.23 ms** | 48.02 ms | 🥇 Bun |
+| Filesystem | **810.60 ms** | 990.25 ms | 918.78 ms | 🥇 Forge |
+
+**Current Highlights**
+
+- 🚀 Fast startup
+- ⏱️ High-performance timers
+- 📁 Fast synchronous filesystem API
+- ⚡ Microtasks close to Bun
+- 🎯 Promise chains are the primary optimization target
+
+---
+
+## Roadmap
+
+The next major milestones are:
+
+- Async Filesystem (`fs.readFile`, `fs.writeFile`)
+- Networking API
+- HTTP Server
+- Module System
+- Worker Threads
+- Performance optimization
+- Node.js compatibility
+- Linux support
+- macOS support
+
+See **ROADMAP.md** for the complete roadmap.
+
+---
+
+## License
+
+MIT
