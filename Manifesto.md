@@ -2,7 +2,7 @@
 
 ## Why Forge exists
 
-Every major JavaScript runtime — Node, Deno, Bun — is built on an engine designed for the browser, not for servers, edge compute, or the agent workloads that make up a growing share of what JavaScript runs today. The industry keeps layering faster APIs and better tooling on top of that shared foundation, but almost nobody questions whether the foundation itself is still the right choice.
+The industry keeps layering faster APIs and better tooling on top of that shared foundation, but almost nobody questions whether the foundation itself is still the right choice.
 
 Forge starts from a different question: what if the runtime were built from scratch for this era, instead of inherited from one?
 
